@@ -19,6 +19,16 @@ app.use(cors({
   },
 }));
 app.use(express.json());
+app.use((request, response, next) => {
+  const startedAt = process.hrtime.bigint();
+  response.on('finish', () => {
+    const durationMs = Number(process.hrtime.bigint() - startedAt) / 1e6;
+    console.log(
+      `[api] ${request.method} ${request.path} ${response.statusCode} ${durationMs.toFixed(1)}ms`,
+    );
+  });
+  next();
+});
 
 app.get('/health', (_request, response) => {
   response.json({ status: 'ok' });
