@@ -2,7 +2,15 @@ const cors = require('cors');
 const express = require('express');
 const { config } = require('./config');
 const { pool } = require('./db');
-const { searchTv } = require('./tmdb');
+const {
+  getDiscovery,
+  getImdbRatings,
+  getTvMazeEpisodes,
+  getTvMazeShow,
+  getTvSeason,
+  getTvShow,
+  searchTv,
+} = require('./tmdb');
 
 const app = express();
 app.use(cors({
@@ -62,6 +70,58 @@ app.get('/api/v1/shows/search', async (request, response, next) => {
   } catch (error) {
     next(error);
   }
+});
+
+app.get('/api/v1/shows/popular', async (_request, response, next) => {
+  try { response.json(await getDiscovery('popular')); } catch (error) { next(error); }
+});
+
+app.get('/api/v1/shows/top-rated', async (_request, response, next) => {
+  try { response.json(await getDiscovery('top_rated')); } catch (error) { next(error); }
+});
+
+app.get('/api/v1/shows/trending', async (_request, response, next) => {
+  try { response.json(await getDiscovery('trending')); } catch (error) { next(error); }
+});
+
+app.get('/api/v1/shows/discover', async (request, response, next) => {
+  try {
+    response.json(await getDiscovery('discover', {
+      with_genres: request.query.with_genres,
+      sort_by: request.query.sort_by || 'popularity.desc',
+      page: request.query.page || 1,
+    }));
+  } catch (error) { next(error); }
+});
+
+app.get('/api/v1/shows/:showId', async (request, response, next) => {
+  try { response.json(await getTvShow(request.params.showId)); } catch (error) { next(error); }
+});
+
+app.get('/api/v1/shows/:showId/seasons/:seasonNumber', async (request, response, next) => {
+  try {
+    response.json(await getTvSeason(request.params.showId, request.params.seasonNumber));
+  } catch (error) { next(error); }
+});
+
+app.get('/api/v1/shows/:showId/ratings', async (request, response, next) => {
+  try { response.json(await getImdbRatings(request.params.showId)); } catch (error) { next(error); }
+});
+
+app.get('/api/v1/providers/tvmaze/show', async (request, response, next) => {
+  const name = typeof request.query.q === 'string' ? request.query.q.trim() : '';
+  if (!name || name.length > 100) {
+    return response.status(400).json({ detail: 'q must contain 1 to 100 characters' });
+  }
+  try { response.json(await getTvMazeShow(name)); } catch (error) { next(error); }
+});
+
+app.get('/api/v1/providers/tvmaze/episodes', async (request, response, next) => {
+  const name = typeof request.query.q === 'string' ? request.query.q.trim() : '';
+  if (!name || name.length > 100) {
+    return response.status(400).json({ detail: 'q must contain 1 to 100 characters' });
+  }
+  try { response.json(await getTvMazeEpisodes(name)); } catch (error) { next(error); }
 });
 
 app.use((error, _request, response, _next) => {
