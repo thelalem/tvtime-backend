@@ -66,7 +66,8 @@ the computer's LAN address.
 ## EthioDeploy
 
 Connect this repository in EthioDeploy and add a new, empty Postgres database.
-Set `TMDB_ACCESS_TOKEN`, `FIREBASE_SERVICE_ACCOUNT_BASE64`, and
+Set `TMDB_ACCESS_TOKEN`, either `FIREBASE_SERVICE_ACCOUNT_JSON` (raw JSON) or
+`FIREBASE_SERVICE_ACCOUNT_BASE64` (Base64 encoded JSON), and
 `FIREBASE_PROJECT_ID=tv-time-bdcd5` as secrets,
 optionally `OMDB_API_KEY`, and `CORS_ALLOWED_ORIGINS` to the exact Flutter Web
 origin if you deploy Flutter Web. Use the Postgres addon's `DATABASE_URL`.
