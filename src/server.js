@@ -20,6 +20,10 @@ app.use(cors({
 }));
 app.use(express.json());
 app.use((request, response, next) => {
+  if (request.path === '/' || request.path.startsWith('/health')) {
+    return next();
+  }
+
   const startedAt = process.hrtime.bigint();
   response.on('finish', () => {
     const durationMs = Number(process.hrtime.bigint() - startedAt) / 1e6;
@@ -28,6 +32,10 @@ app.use((request, response, next) => {
     );
   });
   next();
+});
+
+app.get('/', (_request, response) => {
+  response.json({ service: 'TV Time API', status: 'ok' });
 });
 
 app.get('/health', (_request, response) => {
