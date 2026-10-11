@@ -2,14 +2,19 @@
 
 Node.js and Express backend in plain JavaScript for the TV Time Flutter app.
 Show discovery, search, details, seasons, episodes, recommendations, TVMaze
-fallback data, and optional IMDb ratings are served through this API. Provider
-credentials stay on the server.
+fallback data, optional IMDb ratings, and authenticated user data are served
+through this API. Firebase Authentication remains the identity provider;
+Firebase ID tokens scope all profile and library requests to the matching
+PostgreSQL user row.
 
 ## Local setup
 
 1. Install Node.js 22 or newer and Docker Desktop.
 2. From this directory, copy `.env.example` to `.env` and set
-   `TMDB_ACCESS_TOKEN`. Set `OMDB_API_KEY` to enable IMDb episode ratings.
+   `TMDB_ACCESS_TOKEN`. Configure Firebase Admin using either
+   `GOOGLE_APPLICATION_CREDENTIALS` pointing to a service account JSON file or
+   `FIREBASE_SERVICE_ACCOUNT_BASE64` containing that JSON encoded as base64.
+   Set `OMDB_API_KEY` to enable IMDb episode ratings.
 3. Start PostgreSQL with `docker compose up -d db`.
 4. Install dependencies and start the API:
 
@@ -20,7 +25,8 @@ credentials stay on the server.
 
 5. Open `http://127.0.0.1:8000/health`.
 
-`GET /health` checks the API process. The show endpoints are:
+`GET /health` checks the API process. `GET /health/ready` checks PostgreSQL.
+The existing show endpoints remain available:
 
 - `GET /api/v1/shows/search?q=severance`
 - `GET /api/v1/shows/popular`
@@ -35,18 +41,33 @@ TVMaze fallback endpoints are available under
 `/api/v1/providers/tvmaze/*`. Responses retain the provider-compatible shapes
 expected by the Flutter models.
 
-The database is wired for the next slice (user data and show cache); search
-does not need to write to it. Keep `.env` local and never put backend
-credentials in Flutter `--dart-define` values.
+The PostgreSQL tables are created on startup. User-data endpoints live under
+`/api/v1/me` and require `Authorization: Bearer <Firebase ID token>`:
 
-For the Flutter app, set only `BACKEND_BASE_URL` in its `dart_defines.json`.
+- `GET`, `PATCH /api/v1/me`
+- `GET`, `POST`, `DELETE /api/v1/me/avatar`
+- `GET /api/v1/me/watchlist` and `PUT`, `DELETE /api/v1/me/watchlist/:showId`
+- `GET /api/v1/me/favorites` and `PUT`, `DELETE /api/v1/me/favorites/:showId`
+- `GET /api/v1/me/progress` and `PUT`, `DELETE /api/v1/me/progress/:showId`
+
+For a fresh start, point `DATABASE_URL` at an empty PostgreSQL database and
+deploy the API. Its tables are created on startup. Do not import old Firestore
+or Storage data. Existing Firebase Auth accounts remain valid; the first
+authenticated API request creates a PostgreSQL profile row using that
+account's Firebase UID. Old Firestore records are not read by this API.
+
+Keep `.env` local and never put backend credentials in Flutter
+`--dart-define` values.
+
+For the Flutter app, set `BACKEND_BASE_URL` in its `dart_defines.json`.
 For an Android emulator use `http://10.0.2.2:8000`; for a physical device use
 the computer's LAN address.
 
 ## EthioDeploy
 
-Connect this repository in EthioDeploy and add a Postgres addon. Set
-`TMDB_ACCESS_TOKEN` as a secret, optionally `OMDB_API_KEY` for IMDb ratings, and
-`CORS_ALLOWED_ORIGINS` to the exact Flutter Web origin if you deploy Flutter
-Web. `npm start` binds to `0.0.0.0` and uses EthioDeploy's `PORT` environment
-variable.
+Connect this repository in EthioDeploy and add a new, empty Postgres database.
+Set `TMDB_ACCESS_TOKEN` and `FIREBASE_SERVICE_ACCOUNT_BASE64` as secrets,
+optionally `OMDB_API_KEY`, and `CORS_ALLOWED_ORIGINS` to the exact Flutter Web
+origin if you deploy Flutter Web. Use the Postgres addon's `DATABASE_URL`.
+`npm start`
+binds to `0.0.0.0` and uses EthioDeploy's `PORT` environment variable.

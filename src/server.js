@@ -2,6 +2,8 @@ const cors = require('cors');
 const express = require('express');
 const { config } = require('./config');
 const { pool } = require('./db');
+const { initializeDatabase } = require('./schema');
+const { router: userDataRouter } = require('./user-data');
 const {
   getDiscovery,
   getImdbRatings,
@@ -26,7 +28,7 @@ app.use(cors({
     return callback(null, isLocalWebDev || config.corsAllowedOrigins.includes(origin));
   },
 }));
-app.use(express.json());
+app.use(express.json({ limit: '12mb' }));
 app.use((request, response, next) => {
   if (request.path === '/' || request.path.startsWith('/health')) {
     return next();
@@ -58,6 +60,8 @@ app.get('/health/ready', async (_request, response) => {
     response.status(503).json({ status: 'not_ready', database: 'unavailable' });
   }
 });
+
+app.use('/api/v1', userDataRouter);
 
 app.get('/api/v1/shows/search', async (request, response, next) => {
   const query = typeof request.query.q === 'string' ? request.query.q.trim() : '';
@@ -128,11 +132,25 @@ app.use((error, _request, response, _next) => {
   response.status(error.status || 500).json({ detail: error.message || 'Internal server error' });
 });
 
-const server = app.listen(config.port, '0.0.0.0', () => {
-  console.log(`TV Time API listening on 0.0.0.0:${config.port}`);
+let server;
+
+async function start() {
+  await initializeDatabase();
+  server = app.listen(config.port, '0.0.0.0', () => {
+    console.log(`TV Time API listening on 0.0.0.0:${config.port}`);
+  });
+}
+
+start().catch((error) => {
+  console.error('Failed to initialize API', error);
+  process.exit(1);
 });
 
 async function shutdown() {
+  if (!server) {
+    await pool.end();
+    return process.exit(0);
+  }
   server.close(async () => {
     await pool.end();
     process.exit(0);

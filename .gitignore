@@ -2,3 +2,5 @@
 node_modules/
 coverage/
 *.log
+firebase-service-account*.json
+*-firebase-admin*.json
