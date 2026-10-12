@@ -42,9 +42,19 @@ async function initializeDatabase() {
       show_name TEXT,
       poster_path TEXT,
       backdrop_path TEXT,
+      classification TEXT,
+      classification_checked_at TIMESTAMPTZ,
+      released_episode_count INTEGER NOT NULL DEFAULT 0,
+      is_ended BOOLEAN NOT NULL DEFAULT FALSE,
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       PRIMARY KEY (firebase_uid, series_id)
     );
+
+    ALTER TABLE show_progress
+      ADD COLUMN IF NOT EXISTS classification TEXT,
+      ADD COLUMN IF NOT EXISTS classification_checked_at TIMESTAMPTZ,
+      ADD COLUMN IF NOT EXISTS released_episode_count INTEGER NOT NULL DEFAULT 0,
+      ADD COLUMN IF NOT EXISTS is_ended BOOLEAN NOT NULL DEFAULT FALSE;
   `);
 }
 

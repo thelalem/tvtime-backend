@@ -68,6 +68,10 @@ async function getTvShow(showId) {
   });
 }
 
+async function getTvShowClassificationData(showId) {
+  return tmdbGet(`/tv/${showId}`);
+}
+
 async function getTvSeason(showId, seasonNumber) {
   return tmdbGet(`/tv/${showId}/season/${seasonNumber}`);
 }
@@ -157,5 +161,6 @@ module.exports = {
   getTvMazeShow,
   getTvSeason,
   getTvShow,
+  getTvShowClassificationData,
   searchTv,
 };

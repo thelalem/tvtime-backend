@@ -50,6 +50,13 @@ The PostgreSQL tables are created on startup. User-data endpoints live under
 - `GET /api/v1/me/favorites` and `PUT`, `DELETE /api/v1/me/favorites/:showId`
 - `GET /api/v1/me/progress` and `PUT`, `DELETE /api/v1/me/progress/:showId`
 
+Progress responses include a backend-maintained `classification`,
+`classificationCheckedAt`, `releasedEpisodeCount`, and `isEnded`. The API
+refreshes a missing or expired classification in the background using TMDB;
+progress writes invalidate the cached classification. The Flutter All Shows
+page uses these fields and does not fetch seasons or episodes to classify
+shows.
+
 For a fresh start, point `DATABASE_URL` at an empty PostgreSQL database and
 deploy the API. Its tables are created on startup. Do not import old Firestore
 or Storage data. Existing Firebase Auth accounts remain valid; the first
