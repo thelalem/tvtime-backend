@@ -155,7 +155,7 @@ router.get('/me/watchlist-view', async (request, response, next) => {
     ]);
     const progressById = new Map(
       progressResult.rows.map((row) => [
-        row.seriesId,
+        seriesKey(row.seriesId),
         !hasWatchedProgress(row)
           ? { ...row, classification: 'unstarted', lastWatched: null }
           : row,
@@ -165,7 +165,7 @@ router.get('/me/watchlist-view', async (request, response, next) => {
     const includedIds = new Set();
     for (const row of watchlistResult.rows) {
       const show = { ...row.data, addedAt: row.addedAt };
-      const progress = progressById.get(show.id);
+      const progress = progressById.get(seriesKey(show.id));
       allShows.push({ show, progress: progress || {
         seriesId: show.id,
         currentSeason: 1,
@@ -183,10 +183,10 @@ router.get('/me/watchlist-view', async (request, response, next) => {
         releasedEpisodeCount: 0,
         isEnded: false,
       } });
-      includedIds.add(show.id);
+      includedIds.add(seriesKey(show.id));
     }
     for (const progress of progressResult.rows) {
-      if (includedIds.has(progress.seriesId)) continue;
+      if (includedIds.has(seriesKey(progress.seriesId))) continue;
       allShows.push({
         show: {
           id: progress.seriesId,
@@ -386,6 +386,10 @@ function hasWatchedProgress(progress) {
   return Number(progress.watchedCount || 0) > 0 ||
     (Array.isArray(progress.watchedEpisodes) && progress.watchedEpisodes.length > 0) ||
     progress.lastWatched != null;
+}
+
+function seriesKey(seriesId) {
+  return String(seriesId);
 }
 
 // Joins the in-flight refresh for a series, or starts one.
