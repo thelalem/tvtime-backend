@@ -139,7 +139,11 @@ let server;
 
 async function start() {
   await initializeDatabase();
-  await refreshStaleClassifications();
+  // Not awaited: the sweep is now rate-limited, so on a large library it runs
+  // for minutes. Blocking on it kept the port closed and failed health checks.
+  refreshStaleClassifications().catch((error) => {
+    console.error(`[classification] startup refresh failed: ${error.message}`);
+  });
   const classificationTimer = setInterval(() => {
     refreshStaleClassifications().catch((error) => {
       console.error(`[classification] scheduled refresh failed: ${error.message}`);

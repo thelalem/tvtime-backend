@@ -7,6 +7,20 @@ const router = express.Router();
 const classificationRefreshes = new Map();
 const classificationLifetimeMs = 24 * 60 * 60 * 1000;
 
+// A pull-to-refresh is an explicit request for fresh data, so it ignores the
+// 24-hour lifetime above. This shorter window only collapses repeat pulls and
+// the refresh a just-completed progress write already queued.
+const classificationDebounceMs = 60 * 1000;
+
+// Series reclassified at once. Each one reads a show plus every season from
+// TMDB, so an unbounded fan-out rate-limited itself into failing.
+const classificationConcurrency = 4;
+
+// Wall-clock budget for one pull-to-refresh. Whatever does not fit is left for
+// the next pull or the background sweep, so a large library still gets a
+// prompt, usable response instead of hitting a proxy timeout.
+const classificationRequestBudgetMs = 20 * 1000;
+
 router.use(async (request, response, next) => {
   if (request.path !== '/me' && !request.path.startsWith('/me/')) return next();
   const match = /^Bearer\s+(.+)$/i.exec(request.get('authorization') || '');
@@ -16,7 +30,8 @@ router.use(async (request, response, next) => {
     request.user = { uid: token.uid, email: token.email || '' };
     await pool.query(
       `INSERT INTO app_users(firebase_uid, email) VALUES ($1, $2)
-       ON CONFLICT(firebase_uid) DO UPDATE SET email = EXCLUDED.email`,
+       ON CONFLICT(firebase_uid) DO UPDATE SET email = EXCLUDED.email
+       WHERE app_users.email IS DISTINCT FROM EXCLUDED.email`,
       [request.user.uid, request.user.email],
     );
     next();
@@ -192,7 +207,11 @@ router.get('/me/watchlist-view', async (request, response, next) => {
         ...row.data,
         addedAt: row.addedAt,
       })),
-      progress: progressResult.rows,
+      // The normalized rows, not the raw ones. `allShows` already reported a
+      // zero-watched show as `unstarted` while this list reported whatever was
+      // stored, so the same series contradicted itself across the response.
+      // Map values keep the `updated_at DESC` order of the rows they came from.
+      progress: [...progressById.values()],
       allShows,
     });
   } catch (error) { next(error); }
@@ -201,20 +220,42 @@ router.get('/me/watchlist-view', async (request, response, next) => {
 router.post('/me/refresh-classifications', async (request, response, next) => {
   try {
     const { rows } = await pool.query(
-      `SELECT series_id AS "seriesId"
-       FROM show_progress WHERE firebase_uid=$1`,
+      `SELECT series_id AS "seriesId", classification,
+              classification_checked_at AS "classificationCheckedAt"
+       FROM show_progress WHERE firebase_uid=$1
+       ORDER BY classification_checked_at ASC NULLS FIRST`,
       [request.user.uid],
     );
-    const results = await Promise.allSettled(
-      rows.map((row) => refreshClassification(request.user.uid, row.seriesId)),
+    // Stalest first, so successive pulls work through a large library instead
+    // of re-doing the same leading shows until the budget runs out.
+    const due = rows.filter(
+      (row) => !isClassificationFresh(row, classificationDebounceMs),
     );
-    const failed = results.filter((result) => result.status === 'rejected');
-    for (const result of failed) {
-      console.error(`[classification] pull-to-refresh failed: ${result.reason?.message || result.reason}`);
-    }
+
+    const deadline = Date.now() + classificationRequestBudgetMs;
+    const failedSeriesIds = [];
+    let refreshed = 0;
+    await mapWithConcurrency(
+      due,
+      classificationConcurrency,
+      async (row) => {
+        try {
+          await refreshClassificationOnce(request.user.uid, row.seriesId);
+          refreshed += 1;
+        } catch (error) {
+          failedSeriesIds.push(row.seriesId);
+          console.error(`[classification] ${row.seriesId}: ${error.message}`);
+        }
+      },
+      { stopWhen: () => Date.now() >= deadline },
+    );
+
     response.json({
-      refreshed: results.length - failed.length,
-      failed: failed.length,
+      refreshed,
+      failed: failedSeriesIds.length,
+      failedSeriesIds,
+      skipped: rows.length - due.length,
+      pending: due.length - refreshed - failedSeriesIds.length,
     });
   } catch (error) { next(error); }
 });
@@ -311,14 +352,20 @@ router.put('/me/progress/:seriesId', async (request, response, next) => {
        body.backdropPath ?? null],
     );
     response.json(rows[0]);
-    scheduleClassificationRefresh(request.user.uid, rows[0], true);
+    scheduleClassificationRefresh(request.user.uid, rows[0].seriesId);
   } catch (error) { next(error); }
 });
 
 router.delete('/me/progress/:seriesId', async (request, response, next) => {
+  const seriesId = Number.parseInt(request.params.seriesId, 10);
+  // Unvalidated, a non-numeric id reached Postgres as NaN and came back as a
+  // 500, so the client could not tell a bad request from a server fault.
+  if (!Number.isSafeInteger(seriesId) || seriesId <= 0) {
+    return response.status(400).json({ error: 'invalid_series_id' });
+  }
   try {
     await pool.query('DELETE FROM show_progress WHERE firebase_uid=$1 AND series_id=$2',
-      [request.user.uid, Number.parseInt(request.params.seriesId, 10)]);
+      [request.user.uid, seriesId]);
     response.status(204).end();
   } catch (error) { next(error); }
 });
@@ -327,35 +374,80 @@ function collectionTable(name) {
   return name === 'watchlist' || name === 'favorites' ? name : null;
 }
 
-function scheduleClassificationRefresh(uid, progress, force = false) {
+function isClassificationFresh(progress, maxAgeMs) {
+  if (!progress.classification) return false;
   const checkedAt = progress.classificationCheckedAt
     ? new Date(progress.classificationCheckedAt).getTime()
-    : 0;
-  if (!force && progress.classification && Number.isFinite(checkedAt) &&
-      Date.now() - checkedAt < classificationLifetimeMs) return;
+    : NaN;
+  return Number.isFinite(checkedAt) && Date.now() - checkedAt < maxAgeMs;
+}
 
-  const key = `${uid}:${progress.seriesId}`;
-  if (classificationRefreshes.has(key)) return;
-  const refresh = refreshClassification(uid, progress.seriesId)
-    .catch((error) => console.error(
-      `[classification] ${progress.seriesId}: ${error.message}`,
-    ))
+// Joins the in-flight refresh for a series, or starts one.
+//
+// Pull-to-refresh, the per-write recompute and the background sweep all reach
+// the same series. Running them concurrently doubled the TMDB reads and let two
+// passes race on watchlist membership, each deciding whether the show was still
+// active from its own pre-update snapshot.
+function refreshClassificationOnce(uid, seriesId) {
+  const key = `${uid}:${seriesId}`;
+  const inFlight = classificationRefreshes.get(key);
+  if (inFlight) return inFlight;
+
+  const refresh = refreshClassification(uid, seriesId)
     .finally(() => classificationRefreshes.delete(key));
   classificationRefreshes.set(key, refresh);
+  return refresh;
+}
+
+// Fire-and-forget recompute after a progress write, which stores a NULL
+// classification. The sweep retries anything that stays NULL.
+function scheduleClassificationRefresh(uid, seriesId) {
+  refreshClassificationOnce(uid, seriesId).catch((error) => console.error(
+    `[classification] ${seriesId}: ${error.message}`,
+  ));
+}
+
+// Runs `run` over `items`, at most `limit` at a time, stopping before the next
+// item once `stopWhen` reports the caller's time budget is spent.
+async function mapWithConcurrency(items, limit, run, { stopWhen } = {}) {
+  let next = 0;
+  const workers = Array.from(
+    { length: Math.min(limit, items.length) },
+    async () => {
+      while (next < items.length) {
+        if (stopWhen && stopWhen()) return;
+        // Claimed before the await, not after. Advancing afterwards let every
+        // worker read the same index: each claimed item ran `limit` times and
+        // the `limit - 1` items behind it were skipped, so most of a library
+        // was never reclassified at all.
+        const item = items[next];
+        next += 1;
+        await run(item);
+      }
+    },
+  );
+  await Promise.all(workers);
 }
 
 async function refreshStaleClassifications() {
   const { rows } = await pool.query(
-    `SELECT firebase_uid AS uid, series_id AS "seriesId",
-            classification, classification_checked_at AS "classificationCheckedAt"
+    `SELECT firebase_uid AS uid, series_id AS "seriesId"
      FROM show_progress
      WHERE classification IS NULL
         OR classification_checked_at IS NULL
-        OR classification_checked_at < NOW() - INTERVAL '24 hours'`,
+        OR classification_checked_at < NOW() - ($1::bigint * INTERVAL '1 millisecond')
+     ORDER BY classification_checked_at ASC NULLS FIRST`,
+    [classificationLifetimeMs],
   );
-  for (const progress of rows) {
-    scheduleClassificationRefresh(progress.uid, progress);
-  }
+  // Capped like the pull-to-refresh path. The sweep covers every user at once,
+  // so firing it all at once rate-limited the interactive refreshes behind it.
+  await mapWithConcurrency(rows, classificationConcurrency, async (progress) => {
+    try {
+      await refreshClassificationOnce(progress.uid, progress.seriesId);
+    } catch (error) {
+      console.error(`[classification] ${progress.seriesId}: ${error.message}`);
+    }
+  });
 }
 
 async function refreshClassification(uid, seriesId) {
@@ -377,6 +469,9 @@ async function refreshClassification(uid, seriesId) {
   const seasons = Array.isArray(show.seasons)
     ? show.seasons.filter((season) => Number(season.season_number) > 0)
     : [];
+  // All-or-nothing on purpose: a tolerated season failure undercounts released
+  // episodes, which reads as "caught up" and drops the show off the watchlist.
+  // Throwing leaves the stored classification stale for the sweep to retry.
   const seasonResults = await Promise.all(
     seasons.map((season) => getTvSeason(seriesId, season.season_number)),
   );
@@ -397,29 +492,39 @@ async function refreshClassification(uid, seriesId) {
     }
   }
 
+  // A watched episode can be absent from TMDB's currently released episode
+  // list (for example after a season is renumbered or while an imported
+  // episode is not yet aired there). That still means the user started the
+  // show, so do not classify it as unstarted just because no released episode
+  // matched.
+  const isStarted = Number(rows[0].watchedCount || 0) > 0 ||
+    watched.size > 0 ||
+    rows[0].lastWatched != null;
   const isEnded = ['ended', 'canceled', 'cancelled'].includes(
     String(show.status || '').toLowerCase(),
   );
-  const classification = releasedEpisodeCount === 0
+  const classification = !isStarted
     ? 'unstarted'
-    : watchedReleasedCount === 0
-    ? 'unstarted'
-    : watchedReleasedCount === releasedEpisodeCount
+    : releasedEpisodeCount > 0 &&
+      watchedReleasedCount === releasedEpisodeCount
     ? (isEnded ? 'finished' : 'upToDate')
     : 'watching';
 
+  // `updated_at` is deliberately not touched: it means "when the user's
+  // progress last changed" and both progress reads order by it. A sweep that
+  // bumped it reshuffled every row into reclassification order — stalest
+  // first — which is the reverse of the recency those queries ask for.
+  // `classification_checked_at` already records when this check ran.
   await pool.query(
     `UPDATE show_progress
      SET classification=$3,classification_checked_at=NOW(),
-         released_episode_count=$4,is_ended=$5,updated_at=NOW()
+         released_episode_count=$4,is_ended=$5
      WHERE firebase_uid=$1 AND series_id=$2`,
     [uid, seriesId, classification, releasedEpisodeCount, isEnded],
   );
 
   if (releasedEpisodeCount === 0) return;
   const isCaughtUp = watchedReleasedCount === releasedEpisodeCount;
-  const isStarted = Number(rows[0].watchedCount || 0) > 0 ||
-    rows[0].lastWatched != null;
   const isActive = rows[0].watchlistSeries != null;
   if (isCaughtUp && isActive) {
     await pool.query(

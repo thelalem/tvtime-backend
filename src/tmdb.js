@@ -1,10 +1,32 @@
 const { config } = require('./config');
 
+// TMDB rate-limits per IP, and a classification pass reads one show plus every
+// one of its seasons. Uncapped, a single pull-to-refresh fired hundreds of
+// parallel requests; the 429s surfaced as hard 502s, so `refreshClassification`
+// threw before its UPDATE and the whole batch stayed stale.
+const tmdbConcurrency = 6;
+const tmdbMaxAttempts = 3;
+const tmdbRetryableStatuses = new Set([408, 425, 429, 500, 502, 503, 504]);
+
+// Aired episode lists barely move, so classification reads share a short cache.
+// It also collapses duplicate reads within one sweep: every user tracking the
+// same show would otherwise re-fetch all of its seasons.
+const classificationCacheTtlMs = 30 * 60 * 1000;
+const classificationCacheMaxEntries = 500;
+const classificationCache = new Map();
+
+let tmdbActive = 0;
+const tmdbQueue = [];
+
 function providerError(message, status, cause) {
   const error = new Error(message);
   error.status = status;
   if (cause) error.cause = cause;
   return error;
+}
+
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 async function requestJson(url, options = {}, unavailableMessage = 'Provider is unavailable') {
@@ -23,9 +45,35 @@ async function requestJson(url, options = {}, unavailableMessage = 'Provider is 
   }
 
   if (!response.ok) {
-    throw providerError('Provider request failed', 502);
+    // Keep the upstream status on the error so callers can tell a retryable
+    // 429 from a permanent 404 — both used to arrive as an opaque 502.
+    const error = providerError('Provider request failed', 502);
+    error.providerStatus = response.status;
+    const retryAfter = Number(response.headers.get('retry-after'));
+    if (Number.isFinite(retryAfter) && retryAfter > 0) {
+      error.retryAfterMs = Math.min(retryAfter * 1000, 10000);
+    }
+    throw error;
   }
   return response.json();
+}
+
+// Runs `load` once a TMDB slot frees up, so bursts queue instead of being
+// rate-limited. The slot passes straight to the next waiter on release.
+async function withTmdbSlot(load) {
+  if (tmdbActive < tmdbConcurrency) {
+    tmdbActive += 1;
+  } else {
+    await new Promise((resolve) => tmdbQueue.push(resolve));
+  }
+
+  try {
+    return await load();
+  } finally {
+    const next = tmdbQueue.shift();
+    if (next) next();
+    else tmdbActive -= 1;
+  }
 }
 
 function requireTmdb() {
@@ -55,7 +103,65 @@ function tmdbOptions() {
 }
 
 async function tmdbGet(path, query) {
-  return requestJson(tmdbUrl(path, query), tmdbOptions(), 'TV metadata provider is unavailable');
+  // Built once, outside the loop: `tmdbUrl` validates configuration, and a
+  // missing token is permanent, not a transient provider fault to retry.
+  const url = tmdbUrl(path, query);
+  const options = tmdbOptions();
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      return await withTmdbSlot(
+        () => requestJson(url, options, 'TV metadata provider is unavailable'),
+      );
+    } catch (error) {
+      const status = error.providerStatus ?? error.status;
+      if (attempt >= tmdbMaxAttempts || !tmdbRetryableStatuses.has(status)) {
+        throw error;
+      }
+      // Backs off outside the slot, so waiting never blocks the queue.
+      await delay(error.retryAfterMs ?? attempt * 500);
+    }
+  }
+}
+
+// Serves `load` from cache, collapsing concurrent reads of the same key into
+// one request. Results are shared by reference — callers must not mutate them.
+function cachedClassificationRead(key, load) {
+  const entry = classificationCache.get(key);
+  if (entry) {
+    if (entry.pending) return entry.pending;
+    if (entry.expiresAt > Date.now()) return Promise.resolve(entry.value);
+  }
+
+  const pending = load()
+    .then((value) => {
+      classificationCache.set(key, {
+        value,
+        expiresAt: Date.now() + classificationCacheTtlMs,
+      });
+      pruneClassificationCache();
+      return value;
+    })
+    .catch((error) => {
+      // Never cache a failure: the next pull-to-refresh must be free to retry.
+      classificationCache.delete(key);
+      throw error;
+    });
+  classificationCache.set(key, { pending });
+  return pending;
+}
+
+function pruneClassificationCache() {
+  if (classificationCache.size <= classificationCacheMaxEntries) return;
+  const now = Date.now();
+  for (const [key, entry] of classificationCache) {
+    if (!entry.pending && entry.expiresAt <= now) classificationCache.delete(key);
+  }
+  // Still over budget, so drop entries oldest-first (Map iterates in insertion
+  // order). In-flight reads stay — something is already awaiting them.
+  for (const [key, entry] of classificationCache) {
+    if (classificationCache.size <= classificationCacheMaxEntries) break;
+    if (!entry.pending) classificationCache.delete(key);
+  }
 }
 
 async function searchTv(query) {
@@ -69,11 +175,14 @@ async function getTvShow(showId) {
 }
 
 async function getTvShowClassificationData(showId) {
-  return tmdbGet(`/tv/${showId}`);
+  return cachedClassificationRead(`show:${showId}`, () => tmdbGet(`/tv/${showId}`));
 }
 
 async function getTvSeason(showId, seasonNumber) {
-  return tmdbGet(`/tv/${showId}/season/${seasonNumber}`);
+  return cachedClassificationRead(
+    `season:${showId}:${seasonNumber}`,
+    () => tmdbGet(`/tv/${showId}/season/${seasonNumber}`),
+  );
 }
 
 async function getDiscovery(kind, query = {}) {
