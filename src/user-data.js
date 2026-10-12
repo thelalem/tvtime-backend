@@ -156,7 +156,7 @@ router.get('/me/watchlist-view', async (request, response, next) => {
     const progressById = new Map(
       progressResult.rows.map((row) => [
         row.seriesId,
-        Number(row.watchedCount || 0) === 0
+        !hasWatchedProgress(row)
           ? { ...row, classification: 'unstarted', lastWatched: null }
           : row,
       ]),
@@ -197,7 +197,7 @@ router.get('/me/watchlist-view', async (request, response, next) => {
           rating: 0,
           firstAirDate: '',
         },
-        progress: Number(progress.watchedCount || 0) === 0
+        progress: !hasWatchedProgress(progress)
           ? { ...progress, classification: 'unstarted', lastWatched: null }
           : progress,
       });
@@ -380,6 +380,12 @@ function isClassificationFresh(progress, maxAgeMs) {
     ? new Date(progress.classificationCheckedAt).getTime()
     : NaN;
   return Number.isFinite(checkedAt) && Date.now() - checkedAt < maxAgeMs;
+}
+
+function hasWatchedProgress(progress) {
+  return Number(progress.watchedCount || 0) > 0 ||
+    (Array.isArray(progress.watchedEpisodes) && progress.watchedEpisodes.length > 0) ||
+    progress.lastWatched != null;
 }
 
 // Joins the in-flight refresh for a series, or starts one.
