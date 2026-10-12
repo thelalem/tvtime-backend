@@ -47,6 +47,8 @@ The PostgreSQL tables are created on startup. User-data endpoints live under
 - `GET`, `PATCH /api/v1/me`
 - `GET`, `POST`, `DELETE /api/v1/me/avatar`
 - `GET /api/v1/me/watchlist` and `PUT`, `DELETE /api/v1/me/watchlist/:showId`
+- `GET /api/v1/me/watchlist-view` returns the watchlist and progress in one
+  response for the Watchlist page
 - `GET /api/v1/me/favorites` and `PUT`, `DELETE /api/v1/me/favorites/:showId`
 - `GET /api/v1/me/progress` and `PUT`, `DELETE /api/v1/me/progress/:showId`
 

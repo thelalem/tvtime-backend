@@ -117,6 +117,37 @@ router.get('/me/progress', async (request, response, next) => {
   } catch (error) { next(error); }
 });
 
+router.get('/me/watchlist-view', async (request, response, next) => {
+  try {
+    const [watchlistResult, progressResult] = await Promise.all([
+      pool.query(
+        `SELECT series AS data, added_at AS "addedAt" FROM watchlist
+         WHERE firebase_uid=$1 ORDER BY added_at DESC`,
+        [request.user.uid],
+      ),
+      pool.query(
+        `SELECT series_id AS "seriesId", current_season AS "currentSeason",
+          current_episode AS "currentEpisode", watched_episodes AS "watchedEpisodes",
+          watched_episode_dates AS "watchedEpisodeDates", watched_count AS "watchedCount",
+          total_episodes AS "totalEpisodes", last_watched AS "lastWatched",
+          show_name AS "showName", poster_path AS "posterPath",
+          backdrop_path AS "backdropPath", classification,
+          classification_checked_at AS "classificationCheckedAt",
+          released_episode_count AS "releasedEpisodeCount", is_ended AS "isEnded"
+         FROM show_progress WHERE firebase_uid=$1 ORDER BY updated_at DESC`,
+        [request.user.uid],
+      ),
+    ]);
+    response.json({
+      watchlist: watchlistResult.rows.map((row) => ({
+        ...row.data,
+        addedAt: row.addedAt,
+      })),
+      progress: progressResult.rows,
+    });
+  } catch (error) { next(error); }
+});
+
 router.get('/me/:collection', async (request, response, next) => {
   const table = collectionTable(request.params.collection);
   if (!table) return response.status(404).json({ error: 'not_found' });
