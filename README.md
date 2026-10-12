@@ -61,7 +61,9 @@ shows. The same backend refresh removes caught-up shows from the active
 watchlist and adds them back when a new released episode requires attention;
 the Flutter client no longer performs this reconciliation sweep. A stale
 classification sweep runs at startup and every six hours; a progress write
-triggers an immediate refresh for that show.
+triggers an immediate refresh for that show. Pulling to refresh the Watchlist
+forces classification refreshes for all of the user's tracked shows before
+reloading the Watchlist snapshot.
 
 For a fresh start, point `DATABASE_URL` at an empty PostgreSQL database and
 deploy the API. Its tables are created on startup. Do not import old Firestore

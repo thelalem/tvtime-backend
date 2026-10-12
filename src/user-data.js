@@ -198,6 +198,27 @@ router.get('/me/watchlist-view', async (request, response, next) => {
   } catch (error) { next(error); }
 });
 
+router.post('/me/refresh-classifications', async (request, response, next) => {
+  try {
+    const { rows } = await pool.query(
+      `SELECT series_id AS "seriesId"
+       FROM show_progress WHERE firebase_uid=$1`,
+      [request.user.uid],
+    );
+    const results = await Promise.allSettled(
+      rows.map((row) => refreshClassification(request.user.uid, row.seriesId)),
+    );
+    const failed = results.filter((result) => result.status === 'rejected');
+    for (const result of failed) {
+      console.error(`[classification] pull-to-refresh failed: ${result.reason?.message || result.reason}`);
+    }
+    response.json({
+      refreshed: results.length - failed.length,
+      failed: failed.length,
+    });
+  } catch (error) { next(error); }
+});
+
 router.get('/me/:collection', async (request, response, next) => {
   const table = collectionTable(request.params.collection);
   if (!table) return response.status(404).json({ error: 'not_found' });
