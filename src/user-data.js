@@ -138,12 +138,62 @@ router.get('/me/watchlist-view', async (request, response, next) => {
         [request.user.uid],
       ),
     ]);
+    const progressById = new Map(
+      progressResult.rows.map((row) => [
+        row.seriesId,
+        Number(row.watchedCount || 0) === 0
+          ? { ...row, classification: 'unstarted', lastWatched: null }
+          : row,
+      ]),
+    );
+    const allShows = [];
+    const includedIds = new Set();
+    for (const row of watchlistResult.rows) {
+      const show = { ...row.data, addedAt: row.addedAt };
+      const progress = progressById.get(show.id);
+      allShows.push({ show, progress: progress || {
+        seriesId: show.id,
+        currentSeason: 1,
+        currentEpisode: 1,
+        watchedEpisodes: [],
+        watchedEpisodeDates: {},
+        watchedCount: 0,
+        totalEpisodes: 0,
+        lastWatched: null,
+        showName: show.name,
+        posterPath: show.posterPath,
+        backdropPath: show.backdropPath,
+        classification: 'unstarted',
+        classificationCheckedAt: null,
+        releasedEpisodeCount: 0,
+        isEnded: false,
+      } });
+      includedIds.add(show.id);
+    }
+    for (const progress of progressResult.rows) {
+      if (includedIds.has(progress.seriesId)) continue;
+      allShows.push({
+        show: {
+          id: progress.seriesId,
+          name: progress.showName || 'TV show',
+          overview: '',
+          posterPath: progress.posterPath,
+          backdropPath: progress.backdropPath,
+          rating: 0,
+          firstAirDate: '',
+        },
+        progress: Number(progress.watchedCount || 0) === 0
+          ? { ...progress, classification: 'unstarted', lastWatched: null }
+          : progress,
+      });
+    }
     response.json({
       watchlist: watchlistResult.rows.map((row) => ({
         ...row.data,
         addedAt: row.addedAt,
       })),
       progress: progressResult.rows,
+      allShows,
     });
   } catch (error) { next(error); }
 });
