@@ -269,7 +269,8 @@ router.put('/me/progress/:seriesId', async (request, response, next) => {
         watched_episodes=EXCLUDED.watched_episodes,
         watched_episode_dates=EXCLUDED.watched_episode_dates,
         watched_count=EXCLUDED.watched_count,total_episodes=EXCLUDED.total_episodes,
-        last_watched=EXCLUDED.last_watched,
+        last_watched=CASE WHEN jsonb_array_length(EXCLUDED.watched_episodes) = 0
+          THEN NULL ELSE EXCLUDED.last_watched END,
         show_name=COALESCE(EXCLUDED.show_name,show_progress.show_name),
         poster_path=COALESCE(EXCLUDED.poster_path,show_progress.poster_path),
         backdrop_path=COALESCE(EXCLUDED.backdrop_path,show_progress.backdrop_path),
