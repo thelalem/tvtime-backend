@@ -3,7 +3,10 @@ const express = require('express');
 const { config } = require('./config');
 const { pool } = require('./db');
 const { initializeDatabase } = require('./schema');
-const { router: userDataRouter } = require('./user-data');
+const {
+  refreshStaleClassifications,
+  router: userDataRouter,
+} = require('./user-data');
 const {
   getDiscovery,
   getImdbRatings,
@@ -136,6 +139,13 @@ let server;
 
 async function start() {
   await initializeDatabase();
+  await refreshStaleClassifications();
+  const classificationTimer = setInterval(() => {
+    refreshStaleClassifications().catch((error) => {
+      console.error(`[classification] scheduled refresh failed: ${error.message}`);
+    });
+  }, 6 * 60 * 60 * 1000);
+  classificationTimer.unref();
   server = app.listen(config.port, '0.0.0.0', () => {
     console.log(`TV Time API listening on 0.0.0.0:${config.port}`);
   });

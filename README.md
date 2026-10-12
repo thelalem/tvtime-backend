@@ -55,7 +55,11 @@ Progress responses include a backend-maintained `classification`,
 refreshes a missing or expired classification in the background using TMDB;
 progress writes invalidate the cached classification. The Flutter All Shows
 page uses these fields and does not fetch seasons or episodes to classify
-shows.
+shows. The same backend refresh removes caught-up shows from the active
+watchlist and adds them back when a new released episode requires attention;
+the Flutter client no longer performs this reconciliation sweep. A stale
+classification sweep runs at startup and every six hours; a progress write
+triggers an immediate refresh for that show.
 
 For a fresh start, point `DATABASE_URL` at an empty PostgreSQL database and
 deploy the API. Its tables are created on startup. Do not import old Firestore

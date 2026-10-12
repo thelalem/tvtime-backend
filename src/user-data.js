@@ -113,7 +113,6 @@ router.get('/me/progress', async (request, response, next) => {
        FROM show_progress WHERE firebase_uid=$1 ORDER BY updated_at DESC`,
       [request.user.uid],
     );
-    for (const row of rows) scheduleClassificationRefresh(request.user.uid, row);
     response.json(rows);
   } catch (error) { next(error); }
 });
@@ -209,7 +208,7 @@ router.put('/me/progress/:seriesId', async (request, response, next) => {
        body.backdropPath ?? null],
     );
     response.json(rows[0]);
-    scheduleClassificationRefresh(request.user.uid, rows[0]);
+    scheduleClassificationRefresh(request.user.uid, rows[0], true);
   } catch (error) { next(error); }
 });
 
@@ -225,11 +224,11 @@ function collectionTable(name) {
   return name === 'watchlist' || name === 'favorites' ? name : null;
 }
 
-function scheduleClassificationRefresh(uid, progress) {
+function scheduleClassificationRefresh(uid, progress, force = false) {
   const checkedAt = progress.classificationCheckedAt
     ? new Date(progress.classificationCheckedAt).getTime()
     : 0;
-  if (progress.classification && Number.isFinite(checkedAt) &&
+  if (!force && progress.classification && Number.isFinite(checkedAt) &&
       Date.now() - checkedAt < classificationLifetimeMs) return;
 
   const key = `${uid}:${progress.seriesId}`;
@@ -242,10 +241,31 @@ function scheduleClassificationRefresh(uid, progress) {
   classificationRefreshes.set(key, refresh);
 }
 
+async function refreshStaleClassifications() {
+  const { rows } = await pool.query(
+    `SELECT firebase_uid AS uid, series_id AS "seriesId",
+            classification, classification_checked_at AS "classificationCheckedAt"
+     FROM show_progress
+     WHERE classification IS NULL
+        OR classification_checked_at IS NULL
+        OR classification_checked_at < NOW() - INTERVAL '24 hours'`,
+  );
+  for (const progress of rows) {
+    scheduleClassificationRefresh(progress.uid, progress);
+  }
+}
+
 async function refreshClassification(uid, seriesId) {
   const { rows } = await pool.query(
-    `SELECT watched_episodes AS "watchedEpisodes"
-     FROM show_progress WHERE firebase_uid=$1 AND series_id=$2`,
+    `SELECT p.watched_episodes AS "watchedEpisodes",
+            p.watched_count AS "watchedCount", p.last_watched AS "lastWatched",
+            p.show_name AS "showName", p.poster_path AS "posterPath",
+            p.backdrop_path AS "backdropPath",
+            w.series AS "watchlistSeries"
+     FROM show_progress p
+     LEFT JOIN watchlist w
+       ON w.firebase_uid=p.firebase_uid AND w.series_id=p.series_id
+     WHERE p.firebase_uid=$1 AND p.series_id=$2`,
     [uid, seriesId],
   );
   if (!rows[0]) return;
@@ -292,6 +312,35 @@ async function refreshClassification(uid, seriesId) {
      WHERE firebase_uid=$1 AND series_id=$2`,
     [uid, seriesId, classification, releasedEpisodeCount, isEnded],
   );
+
+  if (releasedEpisodeCount === 0) return;
+  const isCaughtUp = watchedReleasedCount === releasedEpisodeCount;
+  const isStarted = Number(rows[0].watchedCount || 0) > 0 ||
+    rows[0].lastWatched != null;
+  const isActive = rows[0].watchlistSeries != null;
+  if (isCaughtUp && isActive) {
+    await pool.query(
+      'DELETE FROM watchlist WHERE firebase_uid=$1 AND series_id=$2',
+      [uid, seriesId],
+    );
+  } else if (!isCaughtUp && isStarted && !isActive) {
+    const stored = rows[0].watchlistSeries;
+    const series = stored || {
+      id: seriesId,
+      name: rows[0].showName || show.name || 'TV show',
+      overview: show.overview || '',
+      posterPath: rows[0].posterPath || show.poster_path || null,
+      backdropPath: rows[0].backdropPath || show.backdrop_path || null,
+      rating: Number(show.vote_average || 0),
+      firstAirDate: show.first_air_date || '',
+    };
+    await pool.query(
+      `INSERT INTO watchlist(firebase_uid,series_id,series)
+       VALUES ($1,$2,$3::jsonb)
+       ON CONFLICT(firebase_uid,series_id) DO NOTHING`,
+      [uid, seriesId, JSON.stringify(series)],
+    );
+  }
 }
 
-module.exports = { router };
+module.exports = { refreshStaleClassifications, router };
