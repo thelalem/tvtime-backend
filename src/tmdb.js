@@ -125,7 +125,8 @@ async function tmdbGet(path, query) {
 
 // Serves `load` from cache, collapsing concurrent reads of the same key into
 // one request. Results are shared by reference — callers must not mutate them.
-function cachedClassificationRead(key, load) {
+function cachedClassificationRead(key, load, { forceRefresh = false } = {}) {
+  if (forceRefresh) classificationCache.delete(key);
   const entry = classificationCache.get(key);
   if (entry) {
     if (entry.pending) return entry.pending;
@@ -174,14 +175,19 @@ async function getTvShow(showId) {
   });
 }
 
-async function getTvShowClassificationData(showId) {
-  return cachedClassificationRead(`show:${showId}`, () => tmdbGet(`/tv/${showId}`));
+async function getTvShowClassificationData(showId, { forceRefresh = false } = {}) {
+  return cachedClassificationRead(
+    `show:${showId}`,
+    () => tmdbGet(`/tv/${showId}`),
+    { forceRefresh },
+  );
 }
 
-async function getTvSeason(showId, seasonNumber) {
+async function getTvSeason(showId, seasonNumber, { forceRefresh = false } = {}) {
   return cachedClassificationRead(
     `season:${showId}:${seasonNumber}`,
     () => tmdbGet(`/tv/${showId}/season/${seasonNumber}`),
+    { forceRefresh },
   );
 }
 

@@ -2,6 +2,7 @@ const express = require('express');
 const { admin } = require('./firebase');
 const { pool } = require('./db');
 const { getTvSeason, getTvShowClassificationData } = require('./tmdb');
+const { getUpcomingEpisodes } = require('./upcoming');
 
 const router = express.Router();
 const classificationRefreshes = new Map();
@@ -214,6 +215,21 @@ router.get('/me/watchlist-view', async (request, response, next) => {
       progress: [...progressById.values()],
       allShows,
     });
+  } catch (error) { next(error); }
+});
+
+router.get('/me/upcoming', async (request, response, next) => {
+  const today = typeof request.query.today === 'string' ? request.query.today : '';
+  const forceRefresh = request.query.refresh === 'true';
+  try {
+    const episodes = await getUpcomingEpisodes({
+      uid: request.user.uid,
+      today,
+      forceRefresh,
+      pool,
+    });
+    response.set('Cache-Control', 'private, no-store');
+    response.json({ episodes });
   } catch (error) { next(error); }
 });
 

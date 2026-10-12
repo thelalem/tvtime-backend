@@ -49,6 +49,10 @@ The PostgreSQL tables are created on startup. User-data endpoints live under
 - `GET /api/v1/me/watchlist` and `PUT`, `DELETE /api/v1/me/watchlist/:showId`
 - `GET /api/v1/me/watchlist-view` returns the watchlist and progress in one
   response for the Watchlist page
+- `GET /api/v1/me/upcoming?today=YYYY-MM-DD` returns the assembled Upcoming
+  feed for the signed-in user's watchlist and progress history. Results are
+  cached per show and local calendar date for 24 hours; pass `refresh=true` to
+  bypass that cache after an explicit pull-to-refresh.
 - `GET /api/v1/me/favorites` and `PUT`, `DELETE /api/v1/me/favorites/:showId`
 - `GET /api/v1/me/progress` and `PUT`, `DELETE /api/v1/me/progress/:showId`
 
