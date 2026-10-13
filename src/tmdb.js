@@ -4,19 +4,37 @@ const { config } = require('./config');
 // one of its seasons. Uncapped, a single pull-to-refresh fired hundreds of
 // parallel requests; the 429s surfaced as hard 502s, so `refreshClassification`
 // threw before its UPDATE and the whole batch stayed stale.
-const tmdbConcurrency = 6;
-const tmdbMaxAttempts = 3;
-const tmdbRetryableStatuses = new Set([408, 425, 429, 500, 502, 503, 504]);
+//
+// Hundreds at once is the problem, not a dozen: measured against the live API,
+// 15 reads take ~3.5s at a cap of 6 and ~0.3s at 12, with no 429 even at 20.
+// Kept at 12 so the background classification sweep sharing this limiter still
+// has room.
+const tmdbConcurrency = 12;
 
-// Aired episode lists barely move, so classification reads share a short cache.
-// It also collapses duplicate reads within one sweep: every user tracking the
-// same show would otherwise re-fetch all of its seasons.
-const classificationCacheTtlMs = 30 * 60 * 1000;
-const classificationCacheMaxEntries = 500;
-const classificationCache = new Map();
+// TVMaze publishes an allowance of 20 calls per 10 seconds per IP and warns
+// that search endpoints are the first to trip it — `/singlesearch/shows` is a
+// search. Staying inside the published window is far cheaper than discovering
+// it: a 429 costs a full round trip and then a backoff. Kept under 20 for
+// headroom against other traffic from the same host.
+const tvMazeConcurrency = 3;
+const tvMazeMaxPerWindow = 18;
+const tvMazeWindowMs = 10 * 1000;
 
-let tmdbActive = 0;
-const tmdbQueue = [];
+const maxAttempts = 3;
+const retryableStatuses = new Set([408, 425, 429, 500, 502, 503, 504]);
+
+// Provider responses are shared by every user tracking the same show, so one
+// cache in front of all of them collapses both duplicate reads inside a single
+// request and the same read across users.
+const providerCacheMaxEntries = 2000;
+const providerCache = new Map();
+
+// Aired episode lists barely move. TVMaze's own load balancers cache a show
+// for up to 24 hours and everything else for an hour, so holding its answers
+// locally for a while is in line with how it expects to be read.
+const showCacheTtlMs = 30 * 60 * 1000;
+const tvMazeShowCacheTtlMs = 24 * 60 * 60 * 1000;
+const tvMazeEpisodesCacheTtlMs = 6 * 60 * 60 * 1000;
 
 function providerError(message, status, cause) {
   const error = new Error(message);
@@ -58,21 +76,67 @@ async function requestJson(url, options = {}, unavailableMessage = 'Provider is 
   return response.json();
 }
 
-// Runs `load` once a TMDB slot frees up, so bursts queue instead of being
+// Runs `load` once a slot frees up, so bursts queue instead of being
 // rate-limited. The slot passes straight to the next waiter on release.
-async function withTmdbSlot(load) {
-  if (tmdbActive < tmdbConcurrency) {
-    tmdbActive += 1;
-  } else {
-    await new Promise((resolve) => tmdbQueue.push(resolve));
+//
+// A limiter given `maxPerWindow` also holds a caller back until fewer than
+// that many calls have started within `windowMs`. The reservation is taken
+// synchronously with the check so concurrent waiters cannot overshoot the
+// window between them.
+function createRequestLimiter({ concurrency, maxPerWindow = 0, windowMs = 0 }) {
+  let active = 0;
+  const queue = [];
+  const startedAt = [];
+
+  async function acquire() {
+    if (active < concurrency) active += 1;
+    else await new Promise((resolve) => queue.push(resolve));
+    if (!maxPerWindow) return;
+    for (;;) {
+      const now = Date.now();
+      while (startedAt.length && startedAt[0] <= now - windowMs) startedAt.shift();
+      if (startedAt.length < maxPerWindow) {
+        startedAt.push(now);
+        return;
+      }
+      await delay(startedAt[0] + windowMs - now);
+    }
   }
 
-  try {
-    return await load();
-  } finally {
-    const next = tmdbQueue.shift();
+  function release() {
+    const next = queue.shift();
     if (next) next();
-    else tmdbActive -= 1;
+    else active -= 1;
+  }
+
+  return async function withSlot(load) {
+    await acquire();
+    try {
+      return await load();
+    } finally {
+      release();
+    }
+  };
+}
+
+const withTmdbSlot = createRequestLimiter({ concurrency: tmdbConcurrency });
+const withTvMazeSlot = createRequestLimiter({
+  concurrency: tvMazeConcurrency,
+  maxPerWindow: tvMazeMaxPerWindow,
+  windowMs: tvMazeWindowMs,
+});
+
+/// Sends through `limiter`, retrying the statuses that mean "try again".
+async function providerGet(url, { limiter, options, unavailableMessage }) {
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      return await limiter(() => requestJson(url, options, unavailableMessage));
+    } catch (error) {
+      const status = error.providerStatus ?? error.status;
+      if (attempt >= maxAttempts || !retryableStatuses.has(status)) throw error;
+      // Backs off outside the slot, so waiting never blocks the queue.
+      await delay(error.retryAfterMs ?? attempt * 500);
+    }
   }
 }
 
@@ -103,31 +167,21 @@ function tmdbOptions() {
 }
 
 async function tmdbGet(path, query) {
-  // Built once, outside the loop: `tmdbUrl` validates configuration, and a
-  // missing token is permanent, not a transient provider fault to retry.
+  // Built once, outside the retry loop: `tmdbUrl` validates configuration, and
+  // a missing token is permanent, not a transient provider fault to retry.
   const url = tmdbUrl(path, query);
-  const options = tmdbOptions();
-  for (let attempt = 1; ; attempt += 1) {
-    try {
-      return await withTmdbSlot(
-        () => requestJson(url, options, 'TV metadata provider is unavailable'),
-      );
-    } catch (error) {
-      const status = error.providerStatus ?? error.status;
-      if (attempt >= tmdbMaxAttempts || !tmdbRetryableStatuses.has(status)) {
-        throw error;
-      }
-      // Backs off outside the slot, so waiting never blocks the queue.
-      await delay(error.retryAfterMs ?? attempt * 500);
-    }
-  }
+  return providerGet(url, {
+    limiter: withTmdbSlot,
+    options: tmdbOptions(),
+    unavailableMessage: 'TV metadata provider is unavailable',
+  });
 }
 
 // Serves `load` from cache, collapsing concurrent reads of the same key into
 // one request. Results are shared by reference — callers must not mutate them.
-function cachedClassificationRead(key, load, { forceRefresh = false } = {}) {
-  if (forceRefresh) classificationCache.delete(key);
-  const entry = classificationCache.get(key);
+function cachedProviderRead(key, load, { forceRefresh = false, ttlMs }) {
+  if (forceRefresh) providerCache.delete(key);
+  const entry = providerCache.get(key);
   if (entry) {
     if (entry.pending) return entry.pending;
     if (entry.expiresAt > Date.now()) return Promise.resolve(entry.value);
@@ -135,33 +189,30 @@ function cachedClassificationRead(key, load, { forceRefresh = false } = {}) {
 
   const pending = load()
     .then((value) => {
-      classificationCache.set(key, {
-        value,
-        expiresAt: Date.now() + classificationCacheTtlMs,
-      });
-      pruneClassificationCache();
+      providerCache.set(key, { value, expiresAt: Date.now() + ttlMs });
+      pruneProviderCache();
       return value;
     })
     .catch((error) => {
       // Never cache a failure: the next pull-to-refresh must be free to retry.
-      classificationCache.delete(key);
+      providerCache.delete(key);
       throw error;
     });
-  classificationCache.set(key, { pending });
+  providerCache.set(key, { pending });
   return pending;
 }
 
-function pruneClassificationCache() {
-  if (classificationCache.size <= classificationCacheMaxEntries) return;
+function pruneProviderCache() {
+  if (providerCache.size <= providerCacheMaxEntries) return;
   const now = Date.now();
-  for (const [key, entry] of classificationCache) {
-    if (!entry.pending && entry.expiresAt <= now) classificationCache.delete(key);
+  for (const [key, entry] of providerCache) {
+    if (!entry.pending && entry.expiresAt <= now) providerCache.delete(key);
   }
   // Still over budget, so drop entries oldest-first (Map iterates in insertion
   // order). In-flight reads stay — something is already awaiting them.
-  for (const [key, entry] of classificationCache) {
-    if (classificationCache.size <= classificationCacheMaxEntries) break;
-    if (!entry.pending) classificationCache.delete(key);
+  for (const [key, entry] of providerCache) {
+    if (providerCache.size <= providerCacheMaxEntries) break;
+    if (!entry.pending) providerCache.delete(key);
   }
 }
 
@@ -176,18 +227,18 @@ async function getTvShow(showId) {
 }
 
 async function getTvShowClassificationData(showId, { forceRefresh = false } = {}) {
-  return cachedClassificationRead(
+  return cachedProviderRead(
     `show:${showId}`,
     () => tmdbGet(`/tv/${showId}`),
-    { forceRefresh },
+    { forceRefresh, ttlMs: showCacheTtlMs },
   );
 }
 
 async function getTvSeason(showId, seasonNumber, { forceRefresh = false } = {}) {
-  return cachedClassificationRead(
+  return cachedProviderRead(
     `season:${showId}:${seasonNumber}`,
     () => tmdbGet(`/tv/${showId}/season/${seasonNumber}`),
-    { forceRefresh },
+    { forceRefresh, ttlMs: showCacheTtlMs },
   );
 }
 
@@ -245,28 +296,52 @@ async function getImdbRatings(showId) {
   };
 }
 
-async function getTvMazeShow(name) {
-  const url = new URL(`${config.tvMazeBaseUrl.replace(/\/$/, '')}/singlesearch/shows`);
-  url.searchParams.set('q', name);
-  try {
-    return await requestJson(url, {}, 'TVMaze is unavailable');
-  } catch (error) {
-    if (error.status === 502 || error.status === 504) return null;
-    throw error;
-  }
+/// Resolves a show name to its TVMaze entry, or null when TVMaze has nothing.
+///
+/// Cached, which also makes the second lookup free: a show's airtime and its
+/// episode list are both wanted, and each used to run its own `/singlesearch`.
+async function getTvMazeShow(name, { forceRefresh = false } = {}) {
+  const query = typeof name === 'string' ? name.trim() : '';
+  if (!query) return null;
+  return cachedProviderRead(
+    `tvmaze:show:${query.toLowerCase()}`,
+    async () => {
+      const url = new URL(`${config.tvMazeBaseUrl.replace(/\/$/, '')}/singlesearch/shows`);
+      url.searchParams.set('q', query);
+      try {
+        return await providerGet(url, {
+          limiter: withTvMazeSlot,
+          unavailableMessage: 'TVMaze is unavailable',
+        });
+      } catch (error) {
+        if (error.status === 502 || error.status === 504) return null;
+        throw error;
+      }
+    },
+    { forceRefresh, ttlMs: tvMazeShowCacheTtlMs },
+  );
 }
 
-async function getTvMazeEpisodes(name) {
-  const show = await getTvMazeShow(name);
+async function getTvMazeEpisodes(name, { forceRefresh = false } = {}) {
+  const show = await getTvMazeShow(name, { forceRefresh });
   if (!show || !show.id) return [];
-  const url = `${config.tvMazeBaseUrl.replace(/\/$/, '')}/shows/${show.id}/episodes?specials=0`;
-  try {
-    const episodes = await requestJson(url, {}, 'TVMaze is unavailable');
-    return Array.isArray(episodes) ? episodes : [];
-  } catch (error) {
-    if (error.status === 502 || error.status === 504) return [];
-    throw error;
-  }
+  return cachedProviderRead(
+    `tvmaze:episodes:${show.id}`,
+    async () => {
+      const url = `${config.tvMazeBaseUrl.replace(/\/$/, '')}/shows/${show.id}/episodes?specials=0`;
+      try {
+        const episodes = await providerGet(url, {
+          limiter: withTvMazeSlot,
+          unavailableMessage: 'TVMaze is unavailable',
+        });
+        return Array.isArray(episodes) ? episodes : [];
+      } catch (error) {
+        if (error.status === 502 || error.status === 504) return [];
+        throw error;
+      }
+    },
+    { forceRefresh, ttlMs: tvMazeEpisodesCacheTtlMs },
+  );
 }
 
 module.exports = {
