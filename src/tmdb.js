@@ -20,6 +20,14 @@ const tvMazeConcurrency = 3;
 const tvMazeMaxPerWindow = 18;
 const tvMazeWindowMs = 10 * 1000;
 
+// Per attempt. These providers answer in well under a second, so a request that
+// is still silent after this long is on a connection that went dead while it sat
+// idle in the keep-alive pool (the same failure the app had after backgrounding)
+// rather than a slow answer. Waiting the old 15 s turned each such stall into a
+// 15 s page load; abandoning it quickly lets the retry below open a fresh
+// socket, which succeeds straight away.
+const requestTimeoutMs = 4000;
+
 const maxAttempts = 3;
 const retryableStatuses = new Set([408, 425, 429, 500, 502, 503, 504]);
 
@@ -54,7 +62,7 @@ async function requestJson(url, options = {}, unavailableMessage = 'Provider is 
   try {
     response = await fetch(url, {
       ...options,
-      signal: AbortSignal.timeout(15000),
+      signal: AbortSignal.timeout(requestTimeoutMs),
     });
   } catch (cause) {
     throw providerError(
