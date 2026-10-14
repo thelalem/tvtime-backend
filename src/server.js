@@ -18,6 +18,7 @@ const {
   withImdbRating,
   withImdbRatings,
 } = require('./tmdb');
+const { getSimilarShows } = require('./similar');
 
 const app = express();
 app.use(cors({
@@ -125,6 +126,10 @@ app.param('seasonNumber', (_request, response, next, value) => {
 
 app.get('/api/v1/shows/:showId', async (request, response, next) => {
   try { response.json(await withImdbRating(await getTvShow(request.params.showId))); } catch (error) { next(error); }
+});
+
+app.get('/api/v1/shows/:showId/similar', async (request, response, next) => {
+  try { response.json(await withImdbRatings(await getSimilarShows(request.params.showId))); } catch (error) { next(error); }
 });
 
 app.get('/api/v1/shows/:showId/seasons/:seasonNumber', async (request, response, next) => {

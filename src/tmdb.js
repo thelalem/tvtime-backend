@@ -276,6 +276,16 @@ async function getTvRecommendations(showId) {
   );
 }
 
+// TMDB's looser "similar" list (shared keywords and genres). Weaker than the
+// recommendations above, so it only fills in behind them.
+async function getTvSimilar(showId) {
+  return cachedProviderRead(
+    `similar:${showId}`,
+    () => tmdbGet(`/tv/${showId}/similar`),
+    { ttlMs: recommendationsCacheTtlMs },
+  );
+}
+
 async function getDiscovery(kind, query = {}) {
   const paths = {
     popular: '/tv/popular',
@@ -454,6 +464,7 @@ module.exports = {
   getTvRecommendations,
   getTvSeason,
   getTvShow,
+  getTvSimilar,
   getTvShowClassificationData,
   searchTv,
   withImdbRating,

@@ -37,6 +37,7 @@ The existing show endpoints remain available:
 - `GET /api/v1/shows/:showId`
 - `GET /api/v1/shows/:showId/seasons/:seasonNumber`
 - `GET /api/v1/shows/:showId/ratings`
+- `GET /api/v1/shows/:showId/similar` returns up to 12 shows viewers of this one go on to watch (TMDB recommendations, then similar, re-ranked by genre overlap and rating, at least one shared genre required; short results are topped up from discover).
 
 TVMaze fallback endpoints are available under
 `/api/v1/providers/tvmaze/*`. Responses retain the provider-compatible shapes
