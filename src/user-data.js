@@ -4,6 +4,7 @@ const { pool } = require('./db');
 const { getTvSeason, getTvShowClassificationData, withImdbRatings } = require('./tmdb');
 const { getUpcomingEpisodes } = require('./upcoming');
 const { getRecommendations, invalidateRecommendations } = require('./recommendations');
+const { registerMeMovieRoutes } = require('./me-movies');
 const { hasAired, isValidTimeZone, localDateString } = require('./local-date');
 const { EPISODE_KEY, markEpisodes, mergeImportedActions, toMs } = require('./episode-merge');
 
@@ -49,6 +50,10 @@ router.use(async (request, response, next) => {
     next(error);
   }
 });
+
+// Movie routes first: the generic `/me/:collection/:seriesId` routes below would answer these
+// paths with a 404.
+registerMeMovieRoutes(router);
 
 router.get('/me', async (request, response, next) => {
   try {

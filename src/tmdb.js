@@ -252,6 +252,53 @@ async function searchTv(query) {
   return tmdbGet('/search/tv', { query });
 }
 
+// One mixed, relevance-ordered list of shows and movies. TMDB also returns people here; they are
+// not something the app can open, so they are dropped. Each result keeps TMDB's `media_type`
+// ('tv' or 'movie'), which is the tag the app shows. Within TMDB's own order, a title that is
+// exactly what was typed comes first, then titles that start with it, so the closest match wins
+// whichever kind it is.
+async function searchMulti(query) {
+  const data = await tmdbGet('/search/multi', { query });
+  const typed = String(query).trim().toLowerCase();
+  const results = (Array.isArray(data.results) ? data.results : [])
+    .filter((item) => item && (item.media_type === 'tv' || item.media_type === 'movie'));
+  const closeness = (item) => {
+    const title = String(item.title || item.name || '').trim().toLowerCase();
+    if (title === typed) return 0;
+    return title.startsWith(typed) ? 1 : 2;
+  };
+  // Array.prototype.sort is stable, so equal closeness keeps TMDB's order.
+  return { ...data, results: results.sort((a, b) => closeness(a) - closeness(b)) };
+}
+
+// A movie's full record: details, credits, trailers, streaming providers and external ids in one
+// request (movies use `credits`; the `aggregate_credits` shows use does not exist for them).
+async function getMovie(movieId) {
+  return cachedProviderRead(
+    `movie-full:${movieId}`,
+    () => tmdbGet(`/movie/${movieId}`, {
+      append_to_response: 'credits,videos,watch/providers,external_ids',
+    }),
+    { ttlMs: showCacheTtlMs },
+  );
+}
+
+async function getMovieRecommendations(movieId) {
+  return cachedProviderRead(
+    `movie-recommendations:${movieId}`,
+    () => tmdbGet(`/movie/${movieId}/recommendations`),
+    { ttlMs: recommendationsCacheTtlMs },
+  );
+}
+
+async function getMovieSimilar(movieId) {
+  return cachedProviderRead(
+    `movie-similar:${movieId}`,
+    () => tmdbGet(`/movie/${movieId}/similar`),
+    { ttlMs: recommendationsCacheTtlMs },
+  );
+}
+
 // The full show record: details, ratings and every season lookup all start from
 // it, and it used to be fetched from TMDB again each time.
 async function getTvShow(showId) {
@@ -305,6 +352,9 @@ async function getDiscovery(kind, query = {}) {
     top_rated: '/tv/top_rated',
     trending: '/trending/tv/week',
     discover: '/discover/tv',
+    movie_popular: '/movie/popular',
+    movie_trending: '/trending/movie/week',
+    movie_discover: '/discover/movie',
   };
   if (!paths[kind]) throw providerError('Unknown discovery feed', 400);
   return tmdbGet(paths[kind], query);
@@ -384,16 +434,19 @@ async function fetchOmdbSeasonRatings(imdbId, seasonNumber) {
 // and a "no rating" answer is cached too so unrated shows are not re-asked.
 // Failures are not cached: OMDb being down or over quota just means the caller
 // falls back to the TMDB rating for now.
-async function getShowImdbRating(showId, knownImdbId) {
+async function getShowImdbRating(showId, knownImdbId, kind = 'tv') {
   if (!config.omdbApiKey) return null;
+  // A TMDB movie id and a show id are different things that can be the same number, so the
+  // cache keys say which. The show keys keep their original spelling.
+  const isMovie = kind === 'movie';
   return cachedProviderRead(
-    `imdb-show-rating:${showId}`,
+    isMovie ? `imdb-movie-rating:${showId}` : `imdb-show-rating:${showId}`,
     async () => {
       const imdbId = knownImdbId || await readThrough(
-        `imdbid:${showId}`,
+        isMovie ? `imdbid:movie:${showId}` : `imdbid:${showId}`,
         imdbIdCacheTtlMs,
         async () => {
-          const ids = await tmdbGet(`/tv/${showId}/external_ids`);
+          const ids = await tmdbGet(`/${isMovie ? 'movie' : 'tv'}/${showId}/external_ids`);
           return (ids && ids.imdb_id) || null;
         },
       );
@@ -419,8 +472,8 @@ async function getShowImdbRating(showId, knownImdbId) {
 // whole page of 20 shows for up to the provider's 15 s timeout.
 const imdbRatingWaitMs = 2000;
 
-function imdbRatingWithin(showId, knownImdbId) {
-  const lookup = getShowImdbRating(showId, knownImdbId).catch(() => null);
+function imdbRatingWithin(showId, knownImdbId, kind = 'tv') {
+  const lookup = getShowImdbRating(showId, knownImdbId, kind).catch(() => null);
   return Promise.race([
     lookup,
     delay(imdbRatingWaitMs).then(() => null),
@@ -430,11 +483,15 @@ function imdbRatingWithin(showId, knownImdbId) {
 // Replaces `vote_average` on each show of a TMDB list response with its IMDb
 // rating, so every client shows IMDb without knowing about it. The TMDB value
 // is kept as `tmdb_vote_average`; a show IMDb has no rating for keeps TMDB's.
-async function withImdbRatings(list) {
+async function withImdbRatings(list, defaultKind = 'tv') {
   if (!config.omdbApiKey || !list || !Array.isArray(list.results)) return list;
   const results = await Promise.all(list.results.map(async (show) => {
     if (!show || !Number.isInteger(show.id)) return show;
-    const rating = await imdbRatingWithin(show.id);
+    // A result that says what it is (the mixed search) wins over the list's default.
+    const kind = show.media_type === 'movie' || show.media_type === 'tv'
+      ? show.media_type
+      : defaultKind;
+    const rating = await imdbRatingWithin(show.id, undefined, kind);
     return rating == null
       ? show
       : { ...show, tmdb_vote_average: show.vote_average, vote_average: rating };
@@ -443,10 +500,10 @@ async function withImdbRatings(list) {
 }
 
 // Same for one full show response, which already carries its IMDb id.
-async function withImdbRating(show) {
+async function withImdbRating(show, kind = 'tv') {
   if (!show || !Number.isInteger(show.id)) return show;
-  const imdbId = show.external_ids && show.external_ids.imdb_id;
-  const rating = await imdbRatingWithin(show.id, imdbId);
+  const imdbId = (show.external_ids && show.external_ids.imdb_id) || show.imdb_id;
+  const rating = await imdbRatingWithin(show.id, imdbId, kind);
   return rating == null
     ? show
     : { ...show, tmdb_vote_average: show.vote_average, vote_average: rating };
@@ -541,6 +598,9 @@ async function getTvMazeEpisodes(name, { forceRefresh = false } = {}) {
 module.exports = {
   getDiscovery,
   getImdbRatings,
+  getMovie,
+  getMovieRecommendations,
+  getMovieSimilar,
   getTvMazeEpisodes,
   getTvMazeShow,
   getTvRecommendations,
@@ -548,6 +608,7 @@ module.exports = {
   getTvShow,
   getTvSimilar,
   getTvShowClassificationData,
+  searchMulti,
   searchTv,
   withImdbRating,
   withImdbRatings,

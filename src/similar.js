@@ -1,14 +1,34 @@
 const {
   getDiscovery,
+  getMovie,
+  getMovieRecommendations,
+  getMovieSimilar,
   getTvRecommendations,
   getTvShowClassificationData,
   getTvSimilar,
 } = require('./tmdb');
 
 const MAX_RESULTS = 12;
-// A thin result (an obscure show) is topped up from discover.
+// A thin result (an obscure title) is topped up from discover.
 const MIN_BEFORE_TOP_UP = 8;
 const MIN_VOTE_COUNT = 30;
+
+// What differs between a show and a movie: where its own record, its recommendations and its
+// similar list come from, and which discover feed tops a thin result up.
+const SOURCES = {
+  tv: {
+    record: getTvShowClassificationData,
+    recommendations: getTvRecommendations,
+    similar: getTvSimilar,
+    discover: 'discover',
+  },
+  movie: {
+    record: getMovie,
+    recommendations: getMovieRecommendations,
+    similar: getMovieSimilar,
+    discover: 'movie_discover',
+  },
+};
 
 function jaccard(a, b) {
   if (!a.size || !b.size) return 0;
@@ -17,17 +37,17 @@ function jaccard(a, b) {
   return shared / (a.size + b.size - shared);
 }
 
-// Shows a viewer of this one is likely to want next. TMDB's recommendations
-// (what viewers of this show go on to watch) lead, its "similar" list follows,
-// and both are re-ranked by genre overlap with this show and by rating. A
-// candidate must share at least one genre, so a popular show that merely
-// overlaps by accident cannot appear.
-async function getSimilarShows(showId) {
+// Titles a viewer of this one is likely to want next. TMDB's recommendations (what viewers of
+// this title go on to watch) lead, its "similar" list follows, and both are re-ranked by genre
+// overlap with this title and by rating. A candidate must share at least one genre, so a popular
+// title that merely overlaps by accident cannot appear. `kind` is 'tv' (the default) or 'movie'.
+async function getSimilarShows(showId, kind = 'tv') {
+  const source = SOURCES[kind];
   const id = Number(showId);
   const [show, recommended, similar] = await Promise.all([
-    getTvShowClassificationData(id),
-    getTvRecommendations(id).catch(() => ({ results: [] })),
-    getTvSimilar(id).catch(() => ({ results: [] })),
+    source.record(id),
+    source.recommendations(id).catch(() => ({ results: [] })),
+    source.similar(id).catch(() => ({ results: [] })),
   ]);
   const genreIds = (show.genres || []).map((genre) => genre.id);
   const genres = new Set(genreIds);
@@ -55,8 +75,8 @@ async function getSimilarShows(showId) {
 
   if (ranked.length < MIN_BEFORE_TOP_UP && genreIds.length) {
     try {
-      // Comma means AND in TMDB: every genre of this show, not any one of them.
-      const discovered = await getDiscovery('discover', {
+      // Comma means AND in TMDB: every genre of this title, not any one of them.
+      const discovered = await getDiscovery(source.discover, {
         with_genres: genreIds.join(','),
         sort_by: 'popularity.desc',
         page: 1,

@@ -77,6 +77,28 @@ async function initializeDatabase() {
     -- until an app version that reports it connects; treated as UTC meanwhile.
     ALTER TABLE app_users ADD COLUMN IF NOT EXISTS timezone TEXT;
 
+    -- Movies. Separate from the show tables on purpose: a TMDB movie id and a show id are
+    -- different things that can be the same number, and this leaves the show data untouched.
+    -- A watched movie is always on the movie watchlist (ticking adds it), so "watched" is just a
+    -- date on the row: NULL means not watched. Removing a movie deletes the row, which wipes the
+    -- watched date with it.
+    CREATE TABLE IF NOT EXISTS movie_watchlist (
+      firebase_uid TEXT NOT NULL REFERENCES app_users(firebase_uid) ON DELETE CASCADE,
+      movie_id BIGINT NOT NULL,
+      movie JSONB NOT NULL,
+      added_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      watched_on DATE,
+      PRIMARY KEY (firebase_uid, movie_id)
+    );
+
+    CREATE TABLE IF NOT EXISTS movie_favorites (
+      firebase_uid TEXT NOT NULL REFERENCES app_users(firebase_uid) ON DELETE CASCADE,
+      movie_id BIGINT NOT NULL,
+      movie JSONB NOT NULL,
+      added_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      PRIMARY KEY (firebase_uid, movie_id)
+    );
+
     -- Slow-changing provider answers (see persistent-cache.js), so they survive
     -- a restart. Keyed by what was asked, e.g. 'omdb:season:tt0386676:3'.
     CREATE TABLE IF NOT EXISTS provider_cache (

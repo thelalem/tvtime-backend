@@ -19,6 +19,7 @@ const {
   withImdbRatings,
 } = require('./tmdb');
 const { getSimilarShows } = require('./similar');
+const { registerPublicMovieRoutes } = require('./movies');
 
 const app = express();
 app.use(cors({
@@ -157,6 +158,8 @@ app.get('/api/v1/providers/tvmaze/episodes', async (request, response, next) => 
   }
   try { response.json(await getTvMazeEpisodes(name)); } catch (error) { next(error); }
 });
+
+registerPublicMovieRoutes(app);
 
 app.use((error, _request, response, _next) => {
   response.status(error.status || 500).json({ detail: error.message || 'Internal server error' });

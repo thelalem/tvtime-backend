@@ -38,6 +38,11 @@ The existing show endpoints remain available:
 - `GET /api/v1/shows/:showId/seasons/:seasonNumber`
 - `GET /api/v1/shows/:showId/ratings` (per-episode IMDb ratings via OMDb; cached in PostgreSQL per season — airing season 6 h, finished seasons 30 days — so OMDb is not asked on every open)
 - `GET /api/v1/shows/:showId/similar` returns up to 12 shows viewers of this one go on to watch (TMDB recommendations, then similar, re-ranked by genre overlap and rating, at least one shared genre required; short results are topped up from discover).
+- `GET /api/v1/search?q=` shows and movies in one list, closest match first. People are dropped; each
+  result keeps TMDB's `media_type` (`tv` or `movie`), which is the tag the app displays.
+- Movies: `GET /api/v1/movies/trending?page=`, `/movies/popular?page=`, `/movies/:movieId` (details with
+  `credits`, `videos`, `watch/providers`, `external_ids`) and `/movies/:movieId/similar`. They report IMDb
+  ratings in `vote_average` like the show routes.
 
 TVMaze fallback endpoints are available under
 `/api/v1/providers/tvmaze/*`. Responses retain the provider-compatible shapes
@@ -61,6 +66,19 @@ The PostgreSQL tables are created on startup. User-data endpoints live under
   for you" in TMDB list shape (20 per page). Seeds come from favorites, the
   watchlist and watch progress; candidates are TMDB recommendations of those
   seeds, minus anything already tracked. New accounts get popular shows.
+- Movies (see `FEATURE_PLAN.md`, section 4). A watched movie is always on the movie watchlist; `watchedOn`
+  (`YYYY-MM-DD` or `null`) says whether and when it was watched. The server fetches the movie from TMDB,
+  so a client sends no movie body:
+  - `GET /api/v1/me/movies/watchlist`, `PUT`, `DELETE /api/v1/me/movies/watchlist/:movieId`. `PUT` is
+    idempotent and keeps the added and watched dates. `DELETE` is a clean wipe, including the watched date.
+  - `PUT /api/v1/me/movies/watchlist/:movieId/watched` with `{ date: "YYYY-MM-DD" }` ticks a movie and
+    adds it to the watchlist if needed. 400 `invalid_date` / `date_in_future`; 409 `not_released` (with
+    `releaseDate`) for a movie that is not out yet in the user's timezone. `DELETE` on the same path
+    un-ticks: the movie stays on the watchlist and its date is cleared (404 `not_in_watchlist` if absent).
+  - `GET /api/v1/me/movies/favorites` and `PUT`, `DELETE /api/v1/me/movies/favorites/:movieId`.
+  - `GET /api/v1/me/movies/recommendations?page=` is "Movies for you", seeded from favorites, watched
+    and listed movies; new accounts get popular movies.
+  - `GET /api/v1/me/movies/stats` returns `{ watchedCount, watchedMinutes }` for the profile.
 - `GET /api/v1/me/favorites` and `PUT`, `DELETE /api/v1/me/favorites/:showId`
 - `GET /api/v1/me/progress` and `PUT`, `DELETE /api/v1/me/progress/:showId`
 - `GET /api/v1/me/progress/:showId` returns one show's progress (404 if none).
