@@ -1,7 +1,7 @@
 const express = require('express');
 const { admin } = require('./firebase');
 const { pool } = require('./db');
-const { getTvSeason, getTvShowClassificationData } = require('./tmdb');
+const { getTvSeason, getTvShowClassificationData, withImdbRatings } = require('./tmdb');
 const { getUpcomingEpisodes } = require('./upcoming');
 const { getRecommendations, invalidateRecommendations } = require('./recommendations');
 const { hasAired, isValidTimeZone, localDateString } = require('./local-date');
@@ -300,10 +300,10 @@ router.post('/me/refresh-classifications', async (request, response, next) => {
 router.get('/me/recommendations', async (request, response, next) => {
   const page = Number.parseInt(request.query.page, 10);
   try {
-    response.json(await getRecommendations(
+    response.json(await withImdbRatings(await getRecommendations(
       request.user.uid,
       Number.isInteger(page) && page >= 1 && page <= 500 ? page : 1,
-    ));
+    )));
   } catch (error) { next(error); }
 });
 

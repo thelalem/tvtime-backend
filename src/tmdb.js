@@ -33,6 +33,7 @@ const providerCache = new Map();
 // for up to 24 hours and everything else for an hour, so holding its answers
 // locally for a while is in line with how it expects to be read.
 const showCacheTtlMs = 30 * 60 * 1000;
+const imdbRatingCacheTtlMs = 7 * 24 * 60 * 60 * 1000;
 const recommendationsCacheTtlMs = 6 * 60 * 60 * 1000;
 const tvMazeShowCacheTtlMs = 24 * 60 * 60 * 1000;
 const tvMazeEpisodesCacheTtlMs = 6 * 60 * 60 * 1000;
@@ -288,6 +289,60 @@ async function getOmdbSeasonRatings(imdbId, seasonNumber) {
   return { ratings, configured: true };
 }
 
+// The show-level IMDb rating (e.g. 8.7), or null when IMDb has none. One cache
+// entry per show covers both lookups it takes (TMDB external ids, then OMDb),
+// and a "no rating" answer is cached too so unrated shows are not re-asked.
+// Failures are not cached: OMDb being down or over quota just means the caller
+// falls back to the TMDB rating for now.
+async function getShowImdbRating(showId, knownImdbId) {
+  if (!config.omdbApiKey) return null;
+  return cachedProviderRead(
+    `imdb-show-rating:${showId}`,
+    async () => {
+      let imdbId = knownImdbId;
+      if (!imdbId) {
+        const ids = await tmdbGet(`/tv/${showId}/external_ids`);
+        imdbId = ids && ids.imdb_id;
+      }
+      if (!imdbId) return null;
+      const url = new URL(config.omdbBaseUrl);
+      url.searchParams.set('apikey', config.omdbApiKey);
+      url.searchParams.set('i', imdbId);
+      const data = await requestJson(url, {}, 'OMDb is unavailable');
+      const rating = Number.parseFloat(data && data.imdbRating);
+      return data && data.Response !== 'False' && Number.isFinite(rating) && rating > 0
+        ? rating
+        : null;
+    },
+    { ttlMs: imdbRatingCacheTtlMs },
+  );
+}
+
+// Replaces `vote_average` on each show of a TMDB list response with its IMDb
+// rating, so every client shows IMDb without knowing about it. The TMDB value
+// is kept as `tmdb_vote_average`; a show IMDb has no rating for keeps TMDB's.
+async function withImdbRatings(list) {
+  if (!config.omdbApiKey || !list || !Array.isArray(list.results)) return list;
+  const results = await Promise.all(list.results.map(async (show) => {
+    if (!show || !Number.isInteger(show.id)) return show;
+    const rating = await getShowImdbRating(show.id).catch(() => null);
+    return rating == null
+      ? show
+      : { ...show, tmdb_vote_average: show.vote_average, vote_average: rating };
+  }));
+  return { ...list, results };
+}
+
+// Same for one full show response, which already carries its IMDb id.
+async function withImdbRating(show) {
+  if (!show || !Number.isInteger(show.id)) return show;
+  const imdbId = show.external_ids && show.external_ids.imdb_id;
+  const rating = await getShowImdbRating(show.id, imdbId).catch(() => null);
+  return rating == null
+    ? show
+    : { ...show, tmdb_vote_average: show.vote_average, vote_average: rating };
+}
+
 async function getImdbRatings(showId) {
   const show = await getTvShow(showId);
   const imdbId = show.external_ids && show.external_ids.imdb_id;
@@ -364,4 +419,6 @@ module.exports = {
   getTvShow,
   getTvShowClassificationData,
   searchTv,
+  withImdbRating,
+  withImdbRatings,
 };

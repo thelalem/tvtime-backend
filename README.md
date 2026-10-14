@@ -32,6 +32,7 @@ The existing show endpoints remain available:
 - `GET /api/v1/shows/popular`
 - `GET /api/v1/shows/top-rated`
 - `GET /api/v1/shows/trending`  (all three accept `?page=1..500`)
+- Show lists, search and `GET /api/v1/shows/:showId` report the IMDb rating (via OMDb) in `vote_average` when one exists, keeping the TMDB value as `tmdb_vote_average`.
 - `GET /api/v1/shows/discover?with_genres=18|10759`
 - `GET /api/v1/shows/:showId`
 - `GET /api/v1/shows/:showId/seasons/:seasonNumber`

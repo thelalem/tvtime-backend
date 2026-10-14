@@ -15,6 +15,8 @@ const {
   getTvSeason,
   getTvShow,
   searchTv,
+  withImdbRating,
+  withImdbRatings,
 } = require('./tmdb');
 
 const app = express();
@@ -73,7 +75,7 @@ app.get('/api/v1/shows/search', async (request, response, next) => {
   }
 
   try {
-    response.json(await searchTv(query));
+    response.json(await withImdbRatings(await searchTv(query)));
   } catch (error) {
     next(error);
   }
@@ -87,15 +89,15 @@ function discoveryPage(value) {
 }
 
 app.get('/api/v1/shows/popular', async (request, response, next) => {
-  try { response.json(await getDiscovery('popular', { page: discoveryPage(request.query.page) })); } catch (error) { next(error); }
+  try { response.json(await withImdbRatings(await getDiscovery('popular', { page: discoveryPage(request.query.page) }))); } catch (error) { next(error); }
 });
 
 app.get('/api/v1/shows/top-rated', async (request, response, next) => {
-  try { response.json(await getDiscovery('top_rated', { page: discoveryPage(request.query.page) })); } catch (error) { next(error); }
+  try { response.json(await withImdbRatings(await getDiscovery('top_rated', { page: discoveryPage(request.query.page) }))); } catch (error) { next(error); }
 });
 
 app.get('/api/v1/shows/trending', async (request, response, next) => {
-  try { response.json(await getDiscovery('trending', { page: discoveryPage(request.query.page) })); } catch (error) { next(error); }
+  try { response.json(await withImdbRatings(await getDiscovery('trending', { page: discoveryPage(request.query.page) }))); } catch (error) { next(error); }
 });
 
 app.get('/api/v1/shows/discover', async (request, response, next) => {
@@ -122,7 +124,7 @@ app.param('seasonNumber', (_request, response, next, value) => {
 });
 
 app.get('/api/v1/shows/:showId', async (request, response, next) => {
-  try { response.json(await getTvShow(request.params.showId)); } catch (error) { next(error); }
+  try { response.json(await withImdbRating(await getTvShow(request.params.showId))); } catch (error) { next(error); }
 });
 
 app.get('/api/v1/shows/:showId/seasons/:seasonNumber', async (request, response, next) => {
