@@ -321,17 +321,49 @@ async function getOmdbSeasonRatings(imdbId, seasonNumber, ttlMs = airingSeasonRa
   );
 }
 
+// OMDb's free tier allows a fixed number of calls a day. Once it says no, every
+// further call also says no (and counts), so stop asking for a while. Callers
+// see an error flagged `omdbQuota` and fall back to TMDB's rating.
+let omdbBlockedUntil = 0;
+const omdbBlockMs = 30 * 60 * 1000;
+
+function omdbQuotaError() {
+  // 503, not a success with no ratings: the app saves a successful answer on
+  // the device, and an empty one would hide IMDb ratings there for a day. A
+  // failure is not saved and the app falls back to TMDB's ratings.
+  const error = providerError('OMDb is over its request limit', 503);
+  error.omdbQuota = true;
+  return error;
+}
+
+async function omdbGet(url) {
+  if (Date.now() < omdbBlockedUntil) throw omdbQuotaError();
+  let data;
+  try {
+    data = await requestJson(url, {}, 'OMDb is unavailable');
+  } catch (error) {
+    // OMDb answers 401 when the daily limit is used up.
+    if (error.providerStatus === 401) {
+      omdbBlockedUntil = Date.now() + omdbBlockMs;
+      throw omdbQuotaError();
+    }
+    throw error;
+  }
+  if (data && data.Response === 'False' && /limit/i.test(String(data.Error))) {
+    omdbBlockedUntil = Date.now() + omdbBlockMs;
+    throw omdbQuotaError();
+  }
+  return data;
+}
+
 async function fetchOmdbSeasonRatings(imdbId, seasonNumber) {
   const url = new URL(config.omdbBaseUrl);
   url.searchParams.set('apikey', config.omdbApiKey);
   url.searchParams.set('i', imdbId);
   url.searchParams.set('Season', String(seasonNumber));
-  const data = await requestJson(url, {}, 'OMDb is unavailable');
-  // Over the daily quota is not "this season has no ratings": throwing keeps it
-  // out of the cache, so the answer is asked for again once the quota resets.
-  if (data.Response === 'False' && /limit/i.test(String(data.Error))) {
-    throw providerError('OMDb request limit reached', 502);
-  }
+  // A quota error throws, which keeps it out of the cache: it is not "this
+  // season has no ratings", and must be asked again once the quota resets.
+  const data = await omdbGet(url);
   if (data.Response === 'False' || !Array.isArray(data.Episodes)) {
     return { ratings: {}, configured: true };
   }
@@ -370,10 +402,7 @@ async function getShowImdbRating(showId, knownImdbId) {
         const url = new URL(config.omdbBaseUrl);
         url.searchParams.set('apikey', config.omdbApiKey);
         url.searchParams.set('i', imdbId);
-        const data = await requestJson(url, {}, 'OMDb is unavailable');
-        if (data && data.Response === 'False' && /limit/i.test(String(data.Error))) {
-          throw providerError('OMDb request limit reached', 502);
-        }
+        const data = await omdbGet(url);
         const rating = Number.parseFloat(data && data.imdbRating);
         return data && data.Response !== 'False' && Number.isFinite(rating) && rating > 0
           ? rating
