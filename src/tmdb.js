@@ -1,3 +1,4 @@
+const { Agent, fetch } = require('undici');
 const { config } = require('./config');
 
 // TMDB rate-limits per IP, and a classification pass reads one show plus every
@@ -27,6 +28,19 @@ const tvMazeWindowMs = 10 * 1000;
 // 15 s page load; abandoning it quickly lets the retry below open a fresh
 // socket, which succeeds straight away.
 const requestTimeoutMs = 4000;
+
+// The cause of those stalls. Node's built-in fetch keeps idle sockets for as
+// long as the server's Keep-Alive hint allows (up to 10 minutes), but a
+// NAT or load balancer between here and the provider forgets an idle
+// connection well before that and drops its packets without a reset. The next
+// request written to that socket just hangs, and so can the retry if it
+// draws another socket that sat idle just as long. Closing sockets after
+// 10 s idle means a request after a quiet spell pays one TLS handshake
+// (~100 ms) instead of a timeout; bursts still reuse connections.
+const providerAgent = new Agent({
+  keepAliveTimeout: 10 * 1000,
+  keepAliveMaxTimeout: 10 * 1000,
+});
 
 const maxAttempts = 3;
 const retryableStatuses = new Set([408, 425, 429, 500, 502, 503, 504]);
@@ -62,6 +76,7 @@ async function requestJson(url, options = {}, unavailableMessage = 'Provider is 
   try {
     response = await fetch(url, {
       ...options,
+      dispatcher: providerAgent,
       signal: AbortSignal.timeout(requestTimeoutMs),
     });
   } catch (cause) {
