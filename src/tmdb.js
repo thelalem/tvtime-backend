@@ -255,8 +255,8 @@ async function searchTv(query) {
 // One mixed, relevance-ordered list of shows and movies. TMDB also returns people here; they are
 // not something the app can open, so they are dropped. Each result keeps TMDB's `media_type`
 // ('tv' or 'movie'), which is the tag the app shows. Within TMDB's own order, a title that is
-// exactly what was typed comes first, then titles that start with it, so the closest match wins
-// whichever kind it is.
+// exactly what was typed comes first, then titles that start with it, then titles that contain
+// it, then the rest, so the closest match wins whichever kind it is.
 async function searchMulti(query) {
   const data = await tmdbGet('/search/multi', { query });
   const typed = String(query).trim().toLowerCase();
@@ -265,7 +265,8 @@ async function searchMulti(query) {
   const closeness = (item) => {
     const title = String(item.title || item.name || '').trim().toLowerCase();
     if (title === typed) return 0;
-    return title.startsWith(typed) ? 1 : 2;
+    if (title.startsWith(typed)) return 1;
+    return title.includes(typed) ? 2 : 3;
   };
   // Array.prototype.sort is stable, so equal closeness keeps TMDB's order.
   return { ...data, results: results.sort((a, b) => closeness(a) - closeness(b)) };

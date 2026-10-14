@@ -63,6 +63,7 @@ test('search is one mixed list: people dropped, closest match first, TMDB order 
       { id: 3, media_type: 'movie', title: 'Darkest Hour' },
       { id: 4, media_type: 'tv', name: 'Dark' },
       { id: 5, media_type: 'movie', title: ' dark ' },
+      { id: 7, media_type: 'movie', title: 'Nothing Alike' },
       { id: 6, media_type: 'movie', title: 'The Dark Knight' },
     ],
   };
@@ -70,8 +71,8 @@ test('search is one mixed list: people dropped, closest match first, TMDB order 
   const { results } = await tmdb.searchMulti('Dark');
   assert.deepEqual(
     results.map((item) => [item.id, item.media_type]),
-    [[4, 'tv'], [5, 'movie'], [2, 'tv'], [3, 'movie'], [6, 'movie']],
-    'exact matches first, then starts-with, then the rest; each keeps its tag',
+    [[4, 'tv'], [5, 'movie'], [2, 'tv'], [3, 'movie'], [6, 'movie'], [7, 'movie']],
+    'exact, then starts-with, then contains, then the rest; each keeps its tag',
   );
 });
 
