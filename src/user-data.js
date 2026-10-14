@@ -3,6 +3,7 @@ const { admin } = require('./firebase');
 const { pool } = require('./db');
 const { getTvSeason, getTvShowClassificationData } = require('./tmdb');
 const { getUpcomingEpisodes } = require('./upcoming');
+const { getRecommendations, invalidateRecommendations } = require('./recommendations');
 const { hasAired, isValidTimeZone, localDateString } = require('./local-date');
 const { EPISODE_KEY, markEpisodes, mergeImportedActions, toMs } = require('./episode-merge');
 
@@ -296,6 +297,16 @@ router.post('/me/refresh-classifications', async (request, response, next) => {
   } catch (error) { next(error); }
 });
 
+router.get('/me/recommendations', async (request, response, next) => {
+  const page = Number.parseInt(request.query.page, 10);
+  try {
+    response.json(await getRecommendations(
+      request.user.uid,
+      Number.isInteger(page) && page >= 1 && page <= 500 ? page : 1,
+    ));
+  } catch (error) { next(error); }
+});
+
 router.get('/me/:collection', async (request, response, next) => {
   const table = collectionTable(request.params.collection);
   if (!table) return response.status(404).json({ error: 'not_found' });
@@ -334,6 +345,7 @@ router.put('/me/:collection/:seriesId', async (request, response, next) => {
        RETURNING series AS data, added_at AS "addedAt"`,
       [request.user.uid, seriesId, JSON.stringify(data)],
     );
+    invalidateRecommendations(request.user.uid);
     response.json({ ...rows[0].data, addedAt: rows[0].addedAt });
   } catch (error) { next(error); }
 });
@@ -349,6 +361,7 @@ router.delete('/me/:collection/:seriesId', async (request, response, next) => {
   try {
     await pool.query(`DELETE FROM ${table} WHERE firebase_uid=$1 AND series_id=$2`,
       [request.user.uid, seriesId]);
+    invalidateRecommendations(request.user.uid);
     response.status(204).end();
   } catch (error) { next(error); }
 });

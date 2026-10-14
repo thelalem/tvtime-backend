@@ -33,6 +33,7 @@ const providerCache = new Map();
 // for up to 24 hours and everything else for an hour, so holding its answers
 // locally for a while is in line with how it expects to be read.
 const showCacheTtlMs = 30 * 60 * 1000;
+const recommendationsCacheTtlMs = 6 * 60 * 60 * 1000;
 const tvMazeShowCacheTtlMs = 24 * 60 * 60 * 1000;
 const tvMazeEpisodesCacheTtlMs = 6 * 60 * 60 * 1000;
 
@@ -242,6 +243,15 @@ async function getTvSeason(showId, seasonNumber, { forceRefresh = false } = {}) 
   );
 }
 
+// What viewers of this show go on to watch. Slow-moving, so cached for hours.
+async function getTvRecommendations(showId) {
+  return cachedProviderRead(
+    `recommendations:${showId}`,
+    () => tmdbGet(`/tv/${showId}/recommendations`),
+    { ttlMs: recommendationsCacheTtlMs },
+  );
+}
+
 async function getDiscovery(kind, query = {}) {
   const paths = {
     popular: '/tv/popular',
@@ -349,6 +359,7 @@ module.exports = {
   getImdbRatings,
   getTvMazeEpisodes,
   getTvMazeShow,
+  getTvRecommendations,
   getTvSeason,
   getTvShow,
   getTvShowClassificationData,

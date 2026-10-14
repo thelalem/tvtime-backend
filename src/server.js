@@ -79,16 +79,23 @@ app.get('/api/v1/shows/search', async (request, response, next) => {
   }
 });
 
-app.get('/api/v1/shows/popular', async (_request, response, next) => {
-  try { response.json(await getDiscovery('popular')); } catch (error) { next(error); }
+// TMDB serves pages 1..500. Anything else (missing, junk, out of range) is page 1
+// rather than an error, so an old client without the param keeps working.
+function discoveryPage(value) {
+  const page = Number.parseInt(value, 10);
+  return Number.isInteger(page) && page >= 1 && page <= 500 ? page : 1;
+}
+
+app.get('/api/v1/shows/popular', async (request, response, next) => {
+  try { response.json(await getDiscovery('popular', { page: discoveryPage(request.query.page) })); } catch (error) { next(error); }
 });
 
-app.get('/api/v1/shows/top-rated', async (_request, response, next) => {
-  try { response.json(await getDiscovery('top_rated')); } catch (error) { next(error); }
+app.get('/api/v1/shows/top-rated', async (request, response, next) => {
+  try { response.json(await getDiscovery('top_rated', { page: discoveryPage(request.query.page) })); } catch (error) { next(error); }
 });
 
-app.get('/api/v1/shows/trending', async (_request, response, next) => {
-  try { response.json(await getDiscovery('trending')); } catch (error) { next(error); }
+app.get('/api/v1/shows/trending', async (request, response, next) => {
+  try { response.json(await getDiscovery('trending', { page: discoveryPage(request.query.page) })); } catch (error) { next(error); }
 });
 
 app.get('/api/v1/shows/discover', async (request, response, next) => {

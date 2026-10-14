@@ -31,7 +31,7 @@ The existing show endpoints remain available:
 - `GET /api/v1/shows/search?q=severance`
 - `GET /api/v1/shows/popular`
 - `GET /api/v1/shows/top-rated`
-- `GET /api/v1/shows/trending`
+- `GET /api/v1/shows/trending`  (all three accept `?page=1..500`)
 - `GET /api/v1/shows/discover?with_genres=18|10759`
 - `GET /api/v1/shows/:showId`
 - `GET /api/v1/shows/:showId/seasons/:seasonNumber`
@@ -55,6 +55,10 @@ The PostgreSQL tables are created on startup. User-data endpoints live under
   feed for the signed-in user's watchlist and progress history. Results are
   cached per show and local calendar date for 24 hours; pass `refresh=true` to
   bypass that cache after an explicit pull-to-refresh.
+- `GET /api/v1/me/recommendations?page=1..500` returns personalised "Top shows
+  for you" in TMDB list shape (20 per page). Seeds come from favorites, the
+  watchlist and watch progress; candidates are TMDB recommendations of those
+  seeds, minus anything already tracked. New accounts get popular shows.
 - `GET /api/v1/me/favorites` and `PUT`, `DELETE /api/v1/me/favorites/:showId`
 - `GET /api/v1/me/progress` and `PUT`, `DELETE /api/v1/me/progress/:showId`
 - `GET /api/v1/me/progress/:showId` returns one show's progress (404 if none).
