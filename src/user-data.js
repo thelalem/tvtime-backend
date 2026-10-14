@@ -3,6 +3,7 @@ const { admin } = require('./firebase');
 const { pool } = require('./db');
 const { getTvSeason, getTvShowClassificationData } = require('./tmdb');
 const { getUpcomingEpisodes } = require('./upcoming');
+const { hasAired, isValidTimeZone, localDateString } = require('./local-date');
 
 const router = express.Router();
 const classificationRefreshes = new Map();
@@ -16,6 +17,9 @@ const classificationDebounceMs = 60 * 1000;
 // Series reclassified at once. Each one reads a show plus every season from
 // TMDB, so an unbounded fan-out rate-limited itself into failing.
 const classificationConcurrency = 4;
+
+// Upper bound for one stored watchlist/favorites entry (about 32 KB of JSON).
+const maxSeriesDocumentChars = 32 * 1024;
 
 // Wall-clock budget for one pull-to-refresh. Whatever does not fit is left for
 // the next pull or the background sweep, so a large library still gets a
@@ -56,25 +60,36 @@ router.get('/me', async (request, response, next) => {
 });
 
 router.patch('/me', async (request, response, next) => {
-  const displayName = typeof request.body.displayName === 'string'
-    ? request.body.displayName.trim() : null;
+  const body = request.body || {};
+  const displayName = typeof body.displayName === 'string'
+    ? body.displayName.trim() : null;
   if (displayName !== null && displayName.length > 120) {
     return response.status(400).json({ error: 'display_name_too_long' });
   }
+  // Optional. Reported by the app on start and resume so "has it aired?" can be
+  // answered against the user's own calendar date.
+  let timezone = null;
+  if (body.timezone !== undefined && body.timezone !== null) {
+    if (!isValidTimeZone(body.timezone)) {
+      return response.status(400).json({ error: 'invalid_timezone' });
+    }
+    timezone = body.timezone;
+  }
   try {
     const { rows } = await pool.query(
-      `UPDATE app_users SET display_name = COALESCE($2, display_name), updated_at = NOW()
+      `UPDATE app_users SET display_name = COALESCE($2, display_name),
+         timezone = COALESCE($3, timezone), updated_at = NOW()
        WHERE firebase_uid = $1
        RETURNING firebase_uid AS id, email, display_name AS "displayName",
-                 photo_url AS "photoUrl", created_at AS "createdAt"`,
-      [request.user.uid, displayName],
+                 photo_url AS "photoUrl", timezone, created_at AS "createdAt"`,
+      [request.user.uid, displayName, timezone],
     );
     response.json(rows[0]);
   } catch (error) { next(error); }
 });
 
 router.post('/me/avatar', async (request, response, next) => {
-  const { contentType, imageBase64 } = request.body;
+  const { contentType, imageBase64 } = request.body || {};
   if (!['image/jpeg', 'image/png', 'image/webp', 'image/gif'].includes(contentType) ||
       typeof imageBase64 !== 'string') {
     return response.status(400).json({ error: 'invalid_image' });
@@ -236,16 +251,20 @@ router.get('/me/upcoming', async (request, response, next) => {
 router.post('/me/refresh-classifications', async (request, response, next) => {
   try {
     const { rows } = await pool.query(
-      `SELECT series_id AS "seriesId", classification,
-              classification_checked_at AS "classificationCheckedAt"
-       FROM show_progress WHERE firebase_uid=$1
-       ORDER BY classification_checked_at ASC NULLS FIRST`,
+      `SELECT p.series_id AS "seriesId", p.classification,
+              p.classification_checked_at AS "classificationCheckedAt",
+              p.classification_date AS "classificationDate", u.timezone
+       FROM show_progress p
+       JOIN app_users u ON u.firebase_uid = p.firebase_uid
+       WHERE p.firebase_uid=$1
+       ORDER BY p.classification_checked_at ASC NULLS FIRST`,
       [request.user.uid],
     );
     // Stalest first, so successive pulls work through a large library instead
     // of re-doing the same leading shows until the budget runs out.
+    const today = localDateString(rows[0]?.timezone);
     const due = rows.filter(
-      (row) => !isClassificationFresh(row, classificationDebounceMs),
+      (row) => !isClassificationFresh(row, classificationDebounceMs, today),
     );
 
     const deadline = Date.now() + classificationRequestBudgetMs;
@@ -292,13 +311,21 @@ router.put('/me/:collection/:seriesId', async (request, response, next) => {
   if (request.params.collection === 'progress') return next();
   const table = collectionTable(request.params.collection);
   const seriesId = Number.parseInt(request.params.seriesId, 10);
-  const bodyId = Number(request.body.id || request.body.seriesId);
+  // Express 5 leaves `request.body` undefined when no JSON body was sent.
+  const body = request.body || {};
+  const bodyId = Number(body.id || body.seriesId);
   if (!table) return response.status(404).json({ error: 'not_found' });
   if (!Number.isSafeInteger(seriesId) || seriesId <= 0 || bodyId !== seriesId) {
     return response.status(400).json({ error: 'invalid_series' });
   }
+  // The row is stored as given, so bound it: the app sends a few short fields,
+  // while the 12 MB body limit (there for avatars) would let any signed-in
+  // account park megabytes in a single watchlist entry.
+  if (JSON.stringify(body).length > maxSeriesDocumentChars) {
+    return response.status(413).json({ error: 'series_too_large' });
+  }
   try {
-    const data = { ...request.body, id: seriesId };
+    const data = { ...body, id: seriesId };
     const { rows } = await pool.query(
       `INSERT INTO ${table}(firebase_uid, series_id, series) VALUES ($1,$2,$3::jsonb)
        ON CONFLICT(firebase_uid,series_id) DO UPDATE
@@ -325,13 +352,126 @@ router.delete('/me/:collection/:seriesId', async (request, response, next) => {
   } catch (error) { next(error); }
 });
 
+const PROGRESS_COLUMNS = `series_id AS "seriesId",current_season AS "currentSeason",
+  current_episode AS "currentEpisode",watched_episodes AS "watchedEpisodes",
+  watched_episode_dates AS "watchedEpisodeDates",watched_count AS "watchedCount",
+  total_episodes AS "totalEpisodes",last_watched AS "lastWatched",
+  show_name AS "showName",poster_path AS "posterPath",backdrop_path AS "backdropPath",
+  classification,classification_checked_at AS "classificationCheckedAt",
+  released_episode_count AS "releasedEpisodeCount",is_ended AS "isEnded"`;
+
+// One show's progress. The app used to download every show's progress and scan
+// for the one it wanted.
+router.get('/me/progress/:seriesId', async (request, response, next) => {
+  const seriesId = Number.parseInt(request.params.seriesId, 10);
+  if (!Number.isSafeInteger(seriesId) || seriesId <= 0) {
+    return response.status(400).json({ error: 'invalid_series_id' });
+  }
+  try {
+    const { rows } = await pool.query(
+      `SELECT ${PROGRESS_COLUMNS} FROM show_progress
+       WHERE firebase_uid=$1 AND series_id=$2`,
+      [request.user.uid, seriesId],
+    );
+    if (!rows[0]) return response.status(404).json({ error: 'not_found' });
+    response.json(rows[0]);
+  } catch (error) { next(error); }
+});
+
+// Marks episodes watched or unwatched without the client sending the whole
+// watched set back. The read-modify-write runs under a per-show advisory lock,
+// so two quick taps (or two devices) apply one after the other instead of the
+// later PUT overwriting the earlier one with a stale copy.
+router.patch('/me/progress/:seriesId/episodes', async (request, response, next) => {
+  const seriesId = Number.parseInt(request.params.seriesId, 10);
+  const body = request.body || {};
+  const keys = body.episodeKeys;
+  if (!Number.isSafeInteger(seriesId) || seriesId <= 0 ||
+      typeof body.watched !== 'boolean' ||
+      !Array.isArray(keys) || keys.length === 0 || keys.length > 5000 ||
+      !keys.every((key) => typeof key === 'string' && /^S\d{1,4}E\d{1,5}$/.test(key)) ||
+      !Number.isInteger(body.currentSeason) || !Number.isInteger(body.currentEpisode)) {
+    return response.status(400).json({ error: 'invalid_episodes' });
+  }
+  const optionalString = (value) => (typeof value === 'string' ? value : null);
+  const db = await pool.connect().catch((error) => { next(error); return null; });
+  if (!db) return;
+  try {
+    await db.query('BEGIN');
+    await db.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))',
+      [`${request.user.uid}:${seriesId}`]);
+    const { rows: existingRows } = await db.query(
+      `SELECT watched_episodes, watched_episode_dates, last_watched, total_episodes
+       FROM show_progress WHERE firebase_uid=$1 AND series_id=$2`,
+      [request.user.uid, seriesId],
+    );
+    const existing = existingRows[0];
+    const episodes = new Set(Array.isArray(existing?.watched_episodes)
+      ? existing.watched_episodes.map(String) : []);
+    const dates = existing?.watched_episode_dates &&
+      typeof existing.watched_episode_dates === 'object' &&
+      !Array.isArray(existing.watched_episode_dates)
+      ? { ...existing.watched_episode_dates } : {};
+    const now = new Date();
+    for (const key of keys) {
+      if (body.watched) {
+        if (!episodes.has(key)) {
+          episodes.add(key);
+          dates[key] = now.toISOString();
+        }
+      } else {
+        episodes.delete(key);
+        delete dates[key];
+      }
+    }
+    const lastWatched = episodes.size === 0
+      ? null : body.watched ? now : (existing?.last_watched ?? null);
+    const totalEpisodes = Number.isInteger(body.totalEpisodes) && body.totalEpisodes >= 0
+      ? body.totalEpisodes : (existing?.total_episodes ?? 0);
+
+    const { rows } = await db.query(
+      `INSERT INTO show_progress(firebase_uid,series_id,current_season,current_episode,
+        watched_episodes,watched_episode_dates,watched_count,total_episodes,last_watched,
+        show_name,poster_path,backdrop_path,classification,classification_checked_at,
+        released_episode_count,is_ended)
+       VALUES ($1,$2,$3,$4,$5::jsonb,$6::jsonb,$7,$8,$9,$10,$11,$12,NULL,NULL,0,FALSE)
+       ON CONFLICT(firebase_uid,series_id) DO UPDATE SET
+        current_season=EXCLUDED.current_season,current_episode=EXCLUDED.current_episode,
+        watched_episodes=EXCLUDED.watched_episodes,
+        watched_episode_dates=EXCLUDED.watched_episode_dates,
+        watched_count=EXCLUDED.watched_count,total_episodes=EXCLUDED.total_episodes,
+        last_watched=EXCLUDED.last_watched,
+        show_name=COALESCE(EXCLUDED.show_name,show_progress.show_name),
+        poster_path=COALESCE(EXCLUDED.poster_path,show_progress.poster_path),
+        backdrop_path=COALESCE(EXCLUDED.backdrop_path,show_progress.backdrop_path),
+        classification=NULL,classification_checked_at=NULL,
+        released_episode_count=0,is_ended=FALSE,updated_at=NOW()
+       RETURNING ${PROGRESS_COLUMNS}`,
+      [request.user.uid, seriesId, body.currentSeason, body.currentEpisode,
+       JSON.stringify([...episodes]), JSON.stringify(dates), episodes.size, totalEpisodes,
+       lastWatched, optionalString(body.showName), optionalString(body.posterPath),
+       optionalString(body.backdropPath)],
+    );
+    await db.query('COMMIT');
+    response.json(rows[0]);
+    scheduleClassificationRefresh(request.user.uid, rows[0].seriesId);
+  } catch (error) {
+    await db.query('ROLLBACK').catch(() => {});
+    next(error);
+  } finally {
+    db.release();
+  }
+});
+
 router.put('/me/progress/:seriesId', async (request, response, next) => {
   const seriesId = Number.parseInt(request.params.seriesId, 10);
-  const body = request.body;
+  const body = request.body || {};
   if (!Number.isSafeInteger(seriesId) || seriesId <= 0 ||
       !Number.isInteger(body.currentSeason) || !Number.isInteger(body.currentEpisode) ||
       !Array.isArray(body.watchedEpisodes) || !body.watchedEpisodeDates ||
-      typeof body.watchedEpisodeDates !== 'object') {
+      typeof body.watchedEpisodeDates !== 'object' ||
+      !isOptionalCount(body.watchedCount) || !isOptionalCount(body.totalEpisodes) ||
+      !isOptionalDate(body.lastWatched)) {
     return response.status(400).json({ error: 'invalid_progress' });
   }
   try {
@@ -386,12 +526,29 @@ router.delete('/me/progress/:seriesId', async (request, response, next) => {
   } catch (error) { next(error); }
 });
 
+// Absent, or a non-negative integer. A string like "abc" used to reach Postgres
+// as NaN and come back as a 500, which the client cannot tell from an outage.
+function isOptionalCount(value) {
+  return value === undefined || value === null ||
+    (Number.isInteger(value) && value >= 0);
+}
+
+// Absent, or an ISO date string Postgres will accept.
+function isOptionalDate(value) {
+  return value === undefined || value === null ||
+    (typeof value === 'string' && !Number.isNaN(Date.parse(value)));
+}
+
 function collectionTable(name) {
   return name === 'watchlist' || name === 'favorites' ? name : null;
 }
 
-function isClassificationFresh(progress, maxAgeMs) {
+// Fresh means recent *and* computed for the user's current local date. Whether
+// an episode has aired depends on that date, so a result from yesterday is
+// stale however recently it ran.
+function isClassificationFresh(progress, maxAgeMs, today) {
   if (!progress.classification) return false;
+  if (progress.classificationDate !== today) return false;
   const checkedAt = progress.classificationCheckedAt
     ? new Date(progress.classificationCheckedAt).getTime()
     : NaN;
@@ -456,14 +613,23 @@ async function mapWithConcurrency(items, limit, run, { stopWhen } = {}) {
 }
 
 async function refreshStaleClassifications() {
-  const { rows } = await pool.query(
-    `SELECT firebase_uid AS uid, series_id AS "seriesId"
-     FROM show_progress
-     WHERE classification IS NULL
-        OR classification_checked_at IS NULL
-        OR classification_checked_at < NOW() - ($1::bigint * INTERVAL '1 millisecond')
-     ORDER BY classification_checked_at ASC NULLS FIRST`,
-    [classificationLifetimeMs],
+  const { rows: all } = await pool.query(
+    `SELECT p.firebase_uid AS uid, p.series_id AS "seriesId", p.classification,
+            p.classification_checked_at AS "classificationCheckedAt",
+            p.classification_date AS "classificationDate", u.timezone
+     FROM show_progress p
+     JOIN app_users u ON u.firebase_uid = p.firebase_uid
+     ORDER BY p.classification_checked_at ASC NULLS FIRST`,
+  );
+  // Decided here rather than in SQL: "today" is per user, and an unrecognised
+  // timezone name must not fail the whole query for everyone.
+  const todayByZone = new Map();
+  const todayFor = (zone) => {
+    if (!todayByZone.has(zone)) todayByZone.set(zone, localDateString(zone));
+    return todayByZone.get(zone);
+  };
+  const rows = all.filter(
+    (row) => !isClassificationFresh(row, classificationLifetimeMs, todayFor(row.timezone)),
   );
   // Capped like the pull-to-refresh path. The sweep covers every user at once,
   // so firing it all at once rate-limited the interactive refreshes behind it.
@@ -482,8 +648,9 @@ async function refreshClassification(uid, seriesId) {
             p.watched_count AS "watchedCount", p.last_watched AS "lastWatched",
             p.show_name AS "showName", p.poster_path AS "posterPath",
             p.backdrop_path AS "backdropPath",
-            w.series AS "watchlistSeries"
+            w.series AS "watchlistSeries", u.timezone
      FROM show_progress p
+     JOIN app_users u ON u.firebase_uid=p.firebase_uid
      LEFT JOIN watchlist w
        ON w.firebase_uid=p.firebase_uid AND w.series_id=p.series_id
      WHERE p.firebase_uid=$1 AND p.series_id=$2`,
@@ -504,13 +671,14 @@ async function refreshClassification(uid, seriesId) {
   const watched = new Set(Array.isArray(rows[0].watchedEpisodes)
     ? rows[0].watchedEpisodes.map(String)
     : []);
-  const today = new Date();
+  // The user's own calendar date, so an episode counts as aired from local
+  // midnight on its air date — the same rule the app applies.
+  const today = localDateString(rows[0].timezone);
   let releasedEpisodeCount = 0;
   let watchedReleasedCount = 0;
   for (const season of seasonResults) {
     for (const episode of Array.isArray(season.episodes) ? season.episodes : []) {
-      const airDate = episode.air_date ? new Date(episode.air_date) : null;
-      if (!airDate || Number.isNaN(airDate.getTime()) || airDate > today) continue;
+      if (!hasAired(episode.air_date, today)) continue;
       releasedEpisodeCount += 1;
       if (watched.has(`S${season.season_number}E${episode.episode_number}`)) {
         watchedReleasedCount += 1;
@@ -544,9 +712,9 @@ async function refreshClassification(uid, seriesId) {
   await pool.query(
     `UPDATE show_progress
      SET classification=$3,classification_checked_at=NOW(),
-         released_episode_count=$4,is_ended=$5
+         released_episode_count=$4,is_ended=$5,classification_date=$6
      WHERE firebase_uid=$1 AND series_id=$2`,
-    [uid, seriesId, classification, releasedEpisodeCount, isEnded],
+    [uid, seriesId, classification, releasedEpisodeCount, isEnded, today],
   );
 
   if (releasedEpisodeCount === 0) return;

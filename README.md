@@ -44,7 +44,9 @@ expected by the Flutter models.
 The PostgreSQL tables are created on startup. User-data endpoints live under
 `/api/v1/me` and require `Authorization: Bearer <Firebase ID token>`:
 
-- `GET`, `PATCH /api/v1/me`
+- `GET`, `PATCH /api/v1/me`. `PATCH` accepts `displayName` and `timezone` (an
+  IANA name such as `Africa/Addis_Ababa`; invalid names get a 400). The app
+  reports `timezone` on sign-in and each time it returns to the foreground.
 - `GET`, `POST`, `DELETE /api/v1/me/avatar`
 - `GET /api/v1/me/watchlist` and `PUT`, `DELETE /api/v1/me/watchlist/:showId`
 - `GET /api/v1/me/watchlist-view` returns the watchlist and progress in one
@@ -55,6 +57,14 @@ The PostgreSQL tables are created on startup. User-data endpoints live under
   bypass that cache after an explicit pull-to-refresh.
 - `GET /api/v1/me/favorites` and `PUT`, `DELETE /api/v1/me/favorites/:showId`
 - `GET /api/v1/me/progress` and `PUT`, `DELETE /api/v1/me/progress/:showId`
+- `GET /api/v1/me/progress/:showId` returns one show's progress (404 if none).
+- `PATCH /api/v1/me/progress/:showId/episodes` with
+  `{ episodeKeys: ["S1E2"], watched: true, currentSeason, currentEpisode,
+  totalEpisodes?, showName?, posterPath?, backdropPath? }` marks episodes
+  watched or unwatched. The server applies the keys to the stored set under a
+  per-show advisory lock, so overlapping requests (two quick taps, or two
+  devices) are applied one after the other instead of overwriting each other.
+  Prefer this to `PUT` for episode tracking; `PUT` replaces the whole row.
 
 Progress responses include a backend-maintained `classification`,
 `classificationCheckedAt`, `releasedEpisodeCount`, and `isEnded`. The API
@@ -65,7 +75,16 @@ shows. The same backend refresh removes caught-up shows from the active
 watchlist and adds them back when a new released episode requires attention;
 the Flutter client no longer performs this reconciliation sweep. A stale
 classification sweep runs at startup and every six hours; a progress write
-triggers an immediate refresh for that show. Pulling to refresh the Watchlist
+triggers an immediate refresh for that show.
+
+"Has this episode aired?" is answered against the user's own calendar date,
+worked out from the `timezone` stored on `app_users` (UTC when it is missing).
+TMDB air dates have no time of day, so an episode counts as aired from local
+midnight on its air date. Each classification records the local date it was
+computed for (`classification_date`); one from an earlier local day is treated
+as stale and recomputed by the next sweep or pull-to-refresh, even if it ran
+recently. Rows written before this existed have no date and are recomputed
+once after deploy. Pulling to refresh the Watchlist
 forces classification refreshes for all of the user's tracked shows before
 reloading the Watchlist snapshot.
 

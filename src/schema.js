@@ -54,7 +54,15 @@ async function initializeDatabase() {
       ADD COLUMN IF NOT EXISTS classification TEXT,
       ADD COLUMN IF NOT EXISTS classification_checked_at TIMESTAMPTZ,
       ADD COLUMN IF NOT EXISTS released_episode_count INTEGER NOT NULL DEFAULT 0,
-      ADD COLUMN IF NOT EXISTS is_ended BOOLEAN NOT NULL DEFAULT FALSE;
+      ADD COLUMN IF NOT EXISTS is_ended BOOLEAN NOT NULL DEFAULT FALSE,
+      -- The user's local calendar date (YYYY-MM-DD) the classification was
+      -- computed for. "Aired" depends on that date, so a classification from an
+      -- earlier local day is stale even when it is recent.
+      ADD COLUMN IF NOT EXISTS classification_date TEXT;
+
+    -- IANA name reported by the user's device, e.g. Africa/Addis_Ababa. NULL
+    -- until an app version that reports it connects; treated as UTC meanwhile.
+    ALTER TABLE app_users ADD COLUMN IF NOT EXISTS timezone TEXT;
   `);
 }
 

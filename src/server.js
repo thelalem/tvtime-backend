@@ -101,6 +101,19 @@ app.get('/api/v1/shows/discover', async (request, response, next) => {
   } catch (error) { next(error); }
 });
 
+// These ids are spliced into the TMDB request path. Express has already decoded
+// them, so an unchecked `..%2F..%2Fsomething` would walk out of `/tv/` and let
+// anyone (these routes need no login) send the server's TMDB token to any path
+// on the provider — and fill the cache with junk keys. Only plain numbers pass.
+app.param('showId', (_request, response, next, value) => {
+  if (/^[1-9]\d{0,9}$/.test(value)) return next();
+  return response.status(400).json({ detail: 'showId must be a positive integer' });
+});
+app.param('seasonNumber', (_request, response, next, value) => {
+  if (/^\d{1,4}$/.test(value)) return next();
+  return response.status(400).json({ detail: 'seasonNumber must be a non-negative integer' });
+});
+
 app.get('/api/v1/shows/:showId', async (request, response, next) => {
   try { response.json(await getTvShow(request.params.showId)); } catch (error) { next(error); }
 });
