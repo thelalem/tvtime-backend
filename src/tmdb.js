@@ -292,6 +292,16 @@ async function getMovieRecommendations(movieId) {
   );
 }
 
+// A collection (a movie series such as "Dune Collection") with all its parts and their release
+// dates, including ones not out yet. Slow-moving, so cached for hours.
+async function getCollection(collectionId) {
+  return cachedProviderRead(
+    `collection:${collectionId}`,
+    () => tmdbGet(`/collection/${collectionId}`),
+    { ttlMs: recommendationsCacheTtlMs },
+  );
+}
+
 async function getMovieSimilar(movieId) {
   return cachedProviderRead(
     `movie-similar:${movieId}`,
@@ -599,6 +609,7 @@ async function getTvMazeEpisodes(name, { forceRefresh = false } = {}) {
 module.exports = {
   getDiscovery,
   getImdbRatings,
+  getCollection,
   getMovie,
   getMovieRecommendations,
   getMovieSimilar,

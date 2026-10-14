@@ -18,11 +18,35 @@ process.env.DATABASE_URL = url;
 // Firebase and TMDB are replaced; the database is real. A bearer token is simply taken to be the
 // user's uid.
 const movies = {
-  101: { id: 101, title: 'Old Movie', release_date: '2000-01-01', runtime: 100, genres: [{ id: 18 }, { id: 35 }], vote_average: 7 },
+  101: { id: 101, title: 'Old Movie', release_date: '2000-01-01', runtime: 100, genres: [{ id: 18 }, { id: 35 }], vote_average: 7, belongs_to_collection: { id: 900, name: 'Old Series' } },
   102: { id: 102, title: 'Future Movie', release_date: '2999-01-01', runtime: 120, genres: [{ id: 18 }] },
-  103: { id: 103, title: 'No Date Movie', release_date: '', runtime: null, genres: [] },
+  103: { id: 103, title: 'No Date Movie', release_date: '', runtime: null, genres: [], belongs_to_collection: { id: 901, name: 'Other Series' } },
   104: { id: 104, title: 'Another Old One', release_date: '1999-05-05', runtime: 90, genres: [{ id: 35 }] },
   201: { id: 201, title: 'Suggested A', release_date: '2010-01-01', runtime: 95, genres: [{ id: 18 }] },
+};
+// TMDB's collections: every part, including ones not out yet.
+const collections = {
+  900: {
+    id: 900,
+    name: 'Old Series',
+    parts: [
+      { id: 101, title: 'Old Movie', release_date: '2000-01-01' },
+      { id: 105, title: 'Out Already', release_date: '2005-05-05' },
+      { id: 106, title: 'Far Future Sequel', release_date: '2999-01-01', poster_path: '/p106.jpg', vote_average: 0 },
+      { id: 107, title: 'Nearer Future Sequel', release_date: '2998-06-01', overview: 'Soon' },
+      { id: 108, title: 'No Date Yet', release_date: '' },
+      { id: 104, title: 'Another Old One', release_date: '2999-12-31' },
+    ],
+  },
+  901: {
+    id: 901,
+    name: 'Other Series',
+    parts: [
+      { id: 103, title: 'No Date Movie', release_date: '' },
+      { id: 109, title: 'Other Series Sequel', release_date: '2997-03-03' },
+      { id: 106, title: 'Far Future Sequel', release_date: '2999-01-01' },
+    ],
+  },
 };
 const recommendationsOf = {
   101: [
@@ -31,7 +55,7 @@ const recommendationsOf = {
     { id: 202, title: 'Suggested B', vote_count: 5, genre_ids: [18], vote_average: 9 },
   ],
 };
-const tmdbCalls = { getMovie: 0 };
+const tmdbCalls = { getMovie: 0, getCollection: 0 };
 const tmdbStub = {
   getMovie: async (id) => {
     tmdbCalls.getMovie += 1;
@@ -43,6 +67,11 @@ const tmdbStub = {
     return movies[id];
   },
   getMovieRecommendations: async (id) => ({ results: recommendationsOf[id] || [] }),
+  getCollection: async (id) => {
+    tmdbCalls.getCollection += 1;
+    if (!collections[id]) throw new Error('no such collection');
+    return collections[id];
+  },
   getDiscovery: async () => ({
     results: [
       { id: 101, title: 'Popular but tracked', vote_count: 9999, genre_ids: [18] },
@@ -64,7 +93,7 @@ const stubs = {
 const originalLoad = Module._load;
 Module._load = function load(request, parent, ...rest) {
   const owner = parent && parent.filename ? parent.filename : '';
-  const wantsStub = /(user-data|me-movies|movie-recommendations|recommendations)\.js$/.test(owner);
+  const wantsStub = /(user-data|me-movies|movie-recommendations|recommendations|sequels)\.js$/.test(owner);
   if (wantsStub && stubs[request]) return stubs[request];
   return originalLoad.call(this, request, parent, ...rest);
 };
@@ -307,4 +336,118 @@ test('seed weights: favorite > recently watched > watched > just added', () => {
   assert.equal(weights.get(3), 4.5);
   assert.equal(weights.get(4), 4);
   assert.ok(weights.get(3) > weights.get(2) && weights.get(2) > weights.get(1));
+});
+
+test('upcoming sequels: future parts of the collections of every listed movie, soonest first', async () => {
+  const uid = newUser();
+  await api(uid, 'PUT', '/me/movies/watchlist/101'); // on the list, not even watched
+  const { status, body } = await api(uid, 'GET', '/me/movies/upcoming-sequels');
+  assert.equal(status, 200);
+  // 104 is a future part of the same collection; 105 is already out; 108 has no date.
+  assert.deepEqual(body.map((movie) => movie.id), [107, 106, 104]);
+  const first = body[0];
+  assert.equal(first.title, 'Nearer Future Sequel');
+  assert.equal(first.release_date, '2998-06-01');
+  assert.equal(first.sequel_to, 'Old Movie');
+  assert.equal(first.collection_name, 'Old Series');
+  assert.equal(first.overview, 'Soon');
+});
+
+test('upcoming sequels: a sequel the user already has is not suggested, and a watched movie counts too', async () => {
+  const uid = newUser();
+  await api(uid, 'PUT', '/me/movies/watchlist/101/watched', { date: today() });
+  await api(uid, 'PUT', '/me/movies/watchlist/104'); // has a future date in the collection
+  const ids = (await api(uid, 'GET', '/me/movies/upcoming-sequels')).body.map((movie) => movie.id);
+  assert.deepEqual(ids, [107, 106]);
+});
+
+test('upcoming sequels: a movie in two collections is listed once; nothing for a movie in none', async () => {
+  const uid = newUser();
+  await api(uid, 'PUT', '/me/movies/watchlist/101');
+  await api(uid, 'PUT', '/me/movies/watchlist/103');
+  const ids = (await api(uid, 'GET', '/me/movies/upcoming-sequels')).body.map((movie) => movie.id);
+  assert.deepEqual(ids, [109, 107, 106, 104], '106 is in both collections but appears once');
+
+  const lonely = newUser();
+  await api(lonely, 'PUT', '/me/movies/watchlist/201'); // no collection
+  assert.deepEqual((await api(lonely, 'GET', '/me/movies/upcoming-sequels')).body, []);
+  assert.deepEqual((await api(newUser(), 'GET', '/me/movies/upcoming-sequels')).body, []);
+});
+
+test('upcoming sequels: hiding one removes it, restoring brings it back, and hiding is per user', async () => {
+  const uid = newUser();
+  const other = newUser();
+  await api(uid, 'PUT', '/me/movies/watchlist/101');
+  await api(other, 'PUT', '/me/movies/watchlist/101');
+
+  assert.equal((await api(uid, 'PUT', '/me/movies/sequels/107/dismissed')).status, 204);
+  assert.equal((await api(uid, 'PUT', '/me/movies/sequels/107/dismissed')).status, 204, 'idempotent');
+  const mine = (await api(uid, 'GET', '/me/movies/upcoming-sequels')).body.map((movie) => movie.id);
+  assert.deepEqual(mine, [106, 104]);
+  const theirs = (await api(other, 'GET', '/me/movies/upcoming-sequels')).body.map((movie) => movie.id);
+  assert.deepEqual(theirs, [107, 106, 104], 'nobody else is affected');
+
+  assert.equal((await api(uid, 'DELETE', '/me/movies/sequels/107/dismissed')).status, 204);
+  const restored = (await api(uid, 'GET', '/me/movies/upcoming-sequels')).body.map((movie) => movie.id);
+  assert.deepEqual(restored, [107, 106, 104]);
+  assert.equal((await api(uid, 'PUT', '/me/movies/sequels/abc/dismissed')).status, 400);
+});
+
+test('upcoming sequels: adding the sequel itself removes it from the suggestions at once', async () => {
+  const uid = newUser();
+  await api(uid, 'PUT', '/me/movies/watchlist/101');
+  assert.ok((await api(uid, 'GET', '/me/movies/upcoming-sequels')).body.some((movie) => movie.id === 104));
+  await api(uid, 'PUT', '/me/movies/watchlist/104');
+  assert.ok(!(await api(uid, 'GET', '/me/movies/upcoming-sequels')).body.some((movie) => movie.id === 104));
+});
+
+test('upcoming sequels: a movie saved before collections were kept is filled in on first use', async () => {
+  const uid = newUser();
+  await api(uid, 'GET', '/me'); // creates the user row
+  const legacy = { id: 101, title: 'Old Movie', release_date: '2000-01-01', runtime: 100, genre_ids: [18] };
+  await pool.query(
+    'INSERT INTO movie_watchlist(firebase_uid, movie_id, movie) VALUES ($1, 101, $2::jsonb)',
+    [uid, JSON.stringify(legacy)],
+  );
+  const before = tmdbCalls.getMovie;
+  const ids = (await api(uid, 'GET', '/me/movies/upcoming-sequels')).body.map((movie) => movie.id);
+  assert.deepEqual(ids, [107, 106, 104]);
+  assert.equal(tmdbCalls.getMovie, before + 1, 'looked up once');
+
+  const { rows } = await pool.query(
+    'SELECT movie FROM movie_watchlist WHERE firebase_uid = $1 AND movie_id = 101',
+    [uid],
+  );
+  assert.deepEqual(rows[0].movie.collection, { id: 900, name: 'Old Series' }, 'saved for next time');
+  assert.equal(rows[0].movie.title, 'Old Movie', 'the rest of the row is untouched');
+});
+
+test('upcoming sequels: a movie in no collection is remembered as such, not looked up again', async () => {
+  const uid = newUser();
+  await api(uid, 'GET', '/me');
+  await pool.query(
+    'INSERT INTO movie_watchlist(firebase_uid, movie_id, movie) VALUES ($1, 104, $2::jsonb)',
+    [uid, JSON.stringify({ id: 104, title: 'Another Old One', release_date: '1999-05-05' })],
+  );
+  await api(uid, 'GET', '/me/movies/upcoming-sequels');
+  const { rows } = await pool.query(
+    "SELECT movie ? 'collection' AS has, movie->'collection' AS collection FROM movie_watchlist WHERE firebase_uid = $1",
+    [uid],
+  );
+  assert.equal(rows[0].has, true);
+  assert.equal(rows[0].collection, null);
+});
+
+test('upcoming sequels: the same user asking twice in a row asks TMDB once', async () => {
+  const uid = newUser();
+  await api(uid, 'PUT', '/me/movies/watchlist/101');
+  await api(uid, 'GET', '/me/movies/upcoming-sequels');
+  const calls = tmdbCalls.getCollection;
+  await api(uid, 'GET', '/me/movies/upcoming-sequels');
+  assert.equal(tmdbCalls.getCollection, calls);
+});
+
+test('upcoming sequels: they need a signed-in user', async () => {
+  const response = await fetch(`${base}/api/v1/me/movies/upcoming-sequels`);
+  assert.equal(response.status, 401);
 });

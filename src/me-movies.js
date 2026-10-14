@@ -5,6 +5,7 @@ const {
   getMovieRecommendationsFor,
   invalidateMovieRecommendations,
 } = require('./movie-recommendations');
+const { collectionOf, getUpcomingSequels, invalidateUpcomingSequels } = require('./sequels');
 
 // A user's movies: the movie watchlist (a watched movie is always on it, watched is just a date on
 // the row), favorites, "Movies for you" and the numbers for the profile. See FEATURE_PLAN.md,
@@ -36,7 +37,15 @@ function compactMovie(movie) {
     release_date: movie.release_date || '',
     runtime: Number.isFinite(movie.runtime) ? movie.runtime : null,
     genre_ids: (movie.genres || []).map((genre) => genre.id),
+    // The series it belongs to, or null: what Upcoming sequels are looked up from.
+    collection: collectionOf(movie),
   };
+}
+
+// What changes when a movie is added, removed, ticked or favorited.
+function invalidateMovieCaches(uid) {
+  invalidateMovieRecommendations(uid);
+  invalidateUpcomingSequels(uid);
 }
 
 function toResponse(row) {
@@ -108,7 +117,7 @@ function registerMeMovieRoutes(router) {
                  to_char(watched_on, 'YYYY-MM-DD') AS "watchedOn"`,
       [request.user.uid, movie.id, JSON.stringify(movie)],
     );
-    invalidateMovieRecommendations(request.user.uid);
+    invalidateMovieCaches(request.user.uid);
     response.json(toResponse(rows[0]));
   }));
 
@@ -119,7 +128,7 @@ function registerMeMovieRoutes(router) {
       'DELETE FROM movie_watchlist WHERE firebase_uid = $1 AND movie_id = $2',
       [request.user.uid, request.params.movieId],
     );
-    invalidateMovieRecommendations(request.user.uid);
+    invalidateMovieCaches(request.user.uid);
     response.status(204).end();
   }));
 
@@ -153,7 +162,7 @@ function registerMeMovieRoutes(router) {
                  to_char(watched_on, 'YYYY-MM-DD') AS "watchedOn"`,
       [request.user.uid, movie.id, JSON.stringify(movie), date],
     );
-    invalidateMovieRecommendations(request.user.uid);
+    invalidateMovieCaches(request.user.uid);
     return response.json(toResponse(rows[0]));
   }));
 
@@ -167,7 +176,7 @@ function registerMeMovieRoutes(router) {
       [request.user.uid, request.params.movieId],
     );
     if (!rows.length) return response.status(404).json({ error: 'not_in_watchlist' });
-    invalidateMovieRecommendations(request.user.uid);
+    invalidateMovieCaches(request.user.uid);
     return response.json(toResponse(rows[0]));
   }));
 
@@ -190,7 +199,7 @@ function registerMeMovieRoutes(router) {
        RETURNING movie AS data, added_at AS "addedAt", NULL::text AS "watchedOn"`,
       [request.user.uid, movie.id, JSON.stringify(movie)],
     );
-    invalidateMovieRecommendations(request.user.uid);
+    invalidateMovieCaches(request.user.uid);
     response.json(toResponse(rows[0]));
   }));
 
@@ -199,7 +208,7 @@ function registerMeMovieRoutes(router) {
       'DELETE FROM movie_favorites WHERE firebase_uid = $1 AND movie_id = $2',
       [request.user.uid, request.params.movieId],
     );
-    invalidateMovieRecommendations(request.user.uid);
+    invalidateMovieCaches(request.user.uid);
     response.status(204).end();
   }));
 
@@ -212,6 +221,33 @@ function registerMeMovieRoutes(router) {
       Number.isInteger(page) && page >= 1 && page <= 500 ? page : 1,
     );
     response.json(await withImdbRatings(list, 'movie'));
+  }));
+
+  // Sequels of the movies on the user's list that are not out yet, soonest first, each saying
+  // which movie it follows. Ones the user hid, and ones they already have, are left out.
+  router.get('/me/movies/upcoming-sequels', handle(async (request, response) => {
+    const today = await userToday(request.user.uid);
+    response.json(await getUpcomingSequels(request.user.uid, today));
+  }));
+
+  // Hiding a sequel from Upcoming. Idempotent in both directions.
+  router.put('/me/movies/sequels/:movieId/dismissed', handle(async (request, response) => {
+    await pool.query(
+      `INSERT INTO dismissed_sequels(firebase_uid, movie_id) VALUES ($1, $2)
+       ON CONFLICT (firebase_uid, movie_id) DO NOTHING`,
+      [request.user.uid, request.params.movieId],
+    );
+    invalidateUpcomingSequels(request.user.uid);
+    response.status(204).end();
+  }));
+
+  router.delete('/me/movies/sequels/:movieId/dismissed', handle(async (request, response) => {
+    await pool.query(
+      'DELETE FROM dismissed_sequels WHERE firebase_uid = $1 AND movie_id = $2',
+      [request.user.uid, request.params.movieId],
+    );
+    invalidateUpcomingSequels(request.user.uid);
+    response.status(204).end();
   }));
 
   // The two numbers for the profile's Stats cards. A movie without a known runtime counts as

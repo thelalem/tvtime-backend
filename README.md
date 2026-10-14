@@ -78,6 +78,11 @@ The PostgreSQL tables are created on startup. User-data endpoints live under
   - `GET /api/v1/me/movies/favorites` and `PUT`, `DELETE /api/v1/me/movies/favorites/:movieId`.
   - `GET /api/v1/me/movies/recommendations?page=` is "Movies for you", seeded from favorites, watched
     and listed movies; new accounts get popular movies.
+  - `GET /api/v1/me/movies/upcoming-sequels` lists movies not out yet that belong to the same TMDB
+    collection as any movie on the user's list (watched or not), soonest first, each with `sequel_to`
+    (the listed movie it follows) and `collection_name`. Movies already on the list, hidden ones and
+    ones with no release date are left out. `PUT` / `DELETE /api/v1/me/movies/sequels/:movieId/dismissed`
+    hides / restores one. Collections are TMDB's own, so a sequel TMDB files elsewhere does not appear.
   - `GET /api/v1/me/movies/stats` returns `{ watchedCount, watchedMinutes }` for the profile.
 - `GET /api/v1/me/favorites` and `PUT`, `DELETE /api/v1/me/favorites/:showId`
 - `GET /api/v1/me/progress` and `PUT`, `DELETE /api/v1/me/progress/:showId`

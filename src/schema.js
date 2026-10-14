@@ -99,6 +99,14 @@ async function initializeDatabase() {
       PRIMARY KEY (firebase_uid, movie_id)
     );
 
+    -- Sequels the user chose to hide from their Upcoming list (see sequels.js).
+    CREATE TABLE IF NOT EXISTS dismissed_sequels (
+      firebase_uid TEXT NOT NULL REFERENCES app_users(firebase_uid) ON DELETE CASCADE,
+      movie_id BIGINT NOT NULL,
+      dismissed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      PRIMARY KEY (firebase_uid, movie_id)
+    );
+
     -- Slow-changing provider answers (see persistent-cache.js), so they survive
     -- a restart. Keyed by what was asked, e.g. 'omdb:season:tt0386676:3'.
     CREATE TABLE IF NOT EXISTS provider_cache (
