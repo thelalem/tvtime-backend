@@ -1,5 +1,6 @@
 const { Agent, fetch } = require('undici');
 const { config } = require('./config');
+const { readThrough } = require('./persistent-cache');
 
 // TMDB rate-limits per IP, and a classification pass reads one show plus every
 // one of its seasons. Uncapped, a single pull-to-refresh fired hundreds of
@@ -56,6 +57,12 @@ const providerCache = new Map();
 // locally for a while is in line with how it expects to be read.
 const showCacheTtlMs = 30 * 60 * 1000;
 const imdbRatingCacheTtlMs = 7 * 24 * 60 * 60 * 1000;
+// A TMDB id keeps its IMDb id for good.
+const imdbIdCacheTtlMs = 90 * 24 * 60 * 60 * 1000;
+// Episode ratings keep moving while a season is airing and barely move after.
+const airingSeasonRatingsTtlMs = 6 * 60 * 60 * 1000;
+const finishedSeasonRatingsTtlMs = 30 * 24 * 60 * 60 * 1000;
+const episodeRatingsCacheTtlMs = 6 * 60 * 60 * 1000;
 const recommendationsCacheTtlMs = 6 * 60 * 60 * 1000;
 const tvMazeShowCacheTtlMs = 24 * 60 * 60 * 1000;
 const tvMazeEpisodesCacheTtlMs = 6 * 60 * 60 * 1000;
@@ -245,10 +252,16 @@ async function searchTv(query) {
   return tmdbGet('/search/tv', { query });
 }
 
+// The full show record: details, ratings and every season lookup all start from
+// it, and it used to be fetched from TMDB again each time.
 async function getTvShow(showId) {
-  return tmdbGet(`/tv/${showId}`, {
-    append_to_response: 'aggregate_credits,videos,watch/providers,external_ids',
-  });
+  return cachedProviderRead(
+    `show-full:${showId}`,
+    () => tmdbGet(`/tv/${showId}`, {
+      append_to_response: 'aggregate_credits,videos,watch/providers,external_ids',
+    }),
+    { ttlMs: showCacheTtlMs },
+  );
 }
 
 async function getTvShowClassificationData(showId, { forceRefresh = false } = {}) {
@@ -297,16 +310,28 @@ async function getDiscovery(kind, query = {}) {
   return tmdbGet(paths[kind], query);
 }
 
-async function getOmdbSeasonRatings(imdbId, seasonNumber) {
+async function getOmdbSeasonRatings(imdbId, seasonNumber, ttlMs = airingSeasonRatingsTtlMs) {
   if (!config.omdbApiKey) {
     return { ratings: {}, configured: false };
   }
+  return readThrough(
+    `omdb:season:${imdbId}:${seasonNumber}`,
+    ttlMs,
+    () => fetchOmdbSeasonRatings(imdbId, seasonNumber),
+  );
+}
 
+async function fetchOmdbSeasonRatings(imdbId, seasonNumber) {
   const url = new URL(config.omdbBaseUrl);
   url.searchParams.set('apikey', config.omdbApiKey);
   url.searchParams.set('i', imdbId);
   url.searchParams.set('Season', String(seasonNumber));
   const data = await requestJson(url, {}, 'OMDb is unavailable');
+  // Over the daily quota is not "this season has no ratings": throwing keeps it
+  // out of the cache, so the answer is asked for again once the quota resets.
+  if (data.Response === 'False' && /limit/i.test(String(data.Error))) {
+    throw providerError('OMDb request limit reached', 502);
+  }
   if (data.Response === 'False' || !Array.isArray(data.Episodes)) {
     return { ratings: {}, configured: true };
   }
@@ -332,20 +357,28 @@ async function getShowImdbRating(showId, knownImdbId) {
   return cachedProviderRead(
     `imdb-show-rating:${showId}`,
     async () => {
-      let imdbId = knownImdbId;
-      if (!imdbId) {
-        const ids = await tmdbGet(`/tv/${showId}/external_ids`);
-        imdbId = ids && ids.imdb_id;
-      }
+      const imdbId = knownImdbId || await readThrough(
+        `imdbid:${showId}`,
+        imdbIdCacheTtlMs,
+        async () => {
+          const ids = await tmdbGet(`/tv/${showId}/external_ids`);
+          return (ids && ids.imdb_id) || null;
+        },
+      );
       if (!imdbId) return null;
-      const url = new URL(config.omdbBaseUrl);
-      url.searchParams.set('apikey', config.omdbApiKey);
-      url.searchParams.set('i', imdbId);
-      const data = await requestJson(url, {}, 'OMDb is unavailable');
-      const rating = Number.parseFloat(data && data.imdbRating);
-      return data && data.Response !== 'False' && Number.isFinite(rating) && rating > 0
-        ? rating
-        : null;
+      return readThrough(`omdb:show:${imdbId}`, imdbRatingCacheTtlMs, async () => {
+        const url = new URL(config.omdbBaseUrl);
+        url.searchParams.set('apikey', config.omdbApiKey);
+        url.searchParams.set('i', imdbId);
+        const data = await requestJson(url, {}, 'OMDb is unavailable');
+        if (data && data.Response === 'False' && /limit/i.test(String(data.Error))) {
+          throw providerError('OMDb request limit reached', 502);
+        }
+        const rating = Number.parseFloat(data && data.imdbRating);
+        return data && data.Response !== 'False' && Number.isFinite(rating) && rating > 0
+          ? rating
+          : null;
+      });
     },
     { ttlMs: imdbRatingCacheTtlMs },
   );
@@ -391,15 +424,35 @@ async function withImdbRating(show) {
 }
 
 async function getImdbRatings(showId) {
+  // The assembled answer is cached too, so repeat opens of the About page do no
+  // work at all. The per-season OMDb reads underneath it are cached in the
+  // database, which is what lets a restart (or the first open after a redeploy)
+  // avoid asking OMDb again.
+  return cachedProviderRead(
+    `imdb-episode-ratings:${showId}`,
+    () => loadImdbRatings(showId),
+    { ttlMs: episodeRatingsCacheTtlMs },
+  );
+}
+
+async function loadImdbRatings(showId) {
   const show = await getTvShow(showId);
   const imdbId = show.external_ids && show.external_ids.imdb_id;
   if (!imdbId) return { imdbId: null, ratings: {}, configured: Boolean(config.omdbApiKey) };
 
-  const seasons = Array.isArray(show.seasons) ? show.seasons : [];
+  const seasons = (Array.isArray(show.seasons) ? show.seasons : [])
+    .filter((season) => Number(season.season_number) > 0);
+  const latest = seasons.reduce((max, season) => Math.max(max, Number(season.season_number)), 0);
+  const status = String(show.status || '').toLowerCase();
+  const isOver = status === 'ended' || status === 'canceled' || status === 'cancelled';
   const results = await Promise.all(
-    seasons
-      .filter((season) => Number(season.season_number) > 0)
-      .map((season) => getOmdbSeasonRatings(imdbId, season.season_number)),
+    seasons.map((season) => getOmdbSeasonRatings(
+      imdbId,
+      season.season_number,
+      !isOver && Number(season.season_number) === latest
+        ? airingSeasonRatingsTtlMs
+        : finishedSeasonRatingsTtlMs,
+    )),
   );
   return {
     imdbId,

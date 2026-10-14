@@ -76,6 +76,14 @@ async function initializeDatabase() {
     -- IANA name reported by the user's device, e.g. Africa/Addis_Ababa. NULL
     -- until an app version that reports it connects; treated as UTC meanwhile.
     ALTER TABLE app_users ADD COLUMN IF NOT EXISTS timezone TEXT;
+
+    -- Slow-changing provider answers (see persistent-cache.js), so they survive
+    -- a restart. Keyed by what was asked, e.g. 'omdb:season:tt0386676:3'.
+    CREATE TABLE IF NOT EXISTS provider_cache (
+      key TEXT PRIMARY KEY,
+      data JSONB NOT NULL,
+      fetched_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
   `);
 }
 

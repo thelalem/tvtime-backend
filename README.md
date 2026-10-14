@@ -36,7 +36,7 @@ The existing show endpoints remain available:
 - `GET /api/v1/shows/discover?with_genres=18|10759`
 - `GET /api/v1/shows/:showId`
 - `GET /api/v1/shows/:showId/seasons/:seasonNumber`
-- `GET /api/v1/shows/:showId/ratings`
+- `GET /api/v1/shows/:showId/ratings` (per-episode IMDb ratings via OMDb; cached in PostgreSQL per season — airing season 6 h, finished seasons 30 days — so OMDb is not asked on every open)
 - `GET /api/v1/shows/:showId/similar` returns up to 12 shows viewers of this one go on to watch (TMDB recommendations, then similar, re-ranked by genre overlap and rating, at least one shared genre required; short results are topped up from discover).
 
 TVMaze fallback endpoints are available under
