@@ -60,6 +60,19 @@ async function initializeDatabase() {
       -- earlier local day is stale even when it is recent.
       ADD COLUMN IF NOT EXISTS classification_date TEXT;
 
+    -- When an episode was last unmarked. Kept apart from show_progress on
+    -- purpose: a row here is invisible to the watchlist, All Shows and the
+    -- tracked-show state, so remembering an unwatch cannot make an unwatched
+    -- show look started. It exists so an older import cannot undo a newer
+    -- unwatch (see episode-merge.js).
+    CREATE TABLE IF NOT EXISTS unwatched_episodes (
+      firebase_uid TEXT NOT NULL REFERENCES app_users(firebase_uid) ON DELETE CASCADE,
+      series_id BIGINT NOT NULL,
+      episode_key TEXT NOT NULL,
+      unwatched_at TIMESTAMPTZ NOT NULL,
+      PRIMARY KEY (firebase_uid, series_id, episode_key)
+    );
+
     -- IANA name reported by the user's device, e.g. Africa/Addis_Ababa. NULL
     -- until an app version that reports it connects; treated as UTC meanwhile.
     ALTER TABLE app_users ADD COLUMN IF NOT EXISTS timezone TEXT;

@@ -65,6 +65,25 @@ The PostgreSQL tables are created on startup. User-data endpoints live under
   per-show advisory lock, so overlapping requests (two quick taps, or two
   devices) are applied one after the other instead of overwriting each other.
   Prefer this to `PUT` for episode tracking; `PUT` replaces the whole row.
+- `POST /api/v1/me/progress/:showId/import` merges imported watch records (for
+  example a Trakt export) into one show:
+  `{ actions: [{ key: "S1E2", watched: true, at: ISO date }], totalEpisodes?,
+  showName?, posterPath?, backdropPath?, summary?: { plays, lastWatched } }`.
+  It answers with the show's progress, or 204 when the show ends up with no
+  watched episodes (a show with nothing watched has no progress row). Repeating
+  a request changes nothing, so clients may retry it.
+
+For every episode the **newest date wins**, whether that is when it was watched
+or when it was unwatched: a newer record is applied, an older or equal one is
+ignored, and an episode the account knows nothing about takes any record. So an
+older export can never undo something a newer export (or a tap in the app)
+changed, whichever order they are imported in. To make that possible the date of
+an unwatch is remembered in the `unwatched_episodes` table. It is deliberately
+separate from `show_progress`: nothing that lists shows, classifies them or
+decides what is "tracked" reads it, so remembering an unwatch can never make an
+unwatched show look started. The rules live in `src/episode-merge.js`; marking
+episodes in the app records an unmark with the current time, and deleting a
+show's progress also forgets its unwatches.
 
 Progress responses include a backend-maintained `classification`,
 `classificationCheckedAt`, `releasedEpisodeCount`, and `isEnded`. The API
@@ -87,6 +106,18 @@ recently. Rows written before this existed have no date and are recomputed
 once after deploy. Pulling to refresh the Watchlist
 forces classification refreshes for all of the user's tracked shows before
 reloading the Watchlist snapshot.
+
+## Tests
+
+`npm test` runs the unit tests. The route tests run the real SQL and need a
+PostgreSQL; they are skipped unless `TEST_DATABASE_URL` is set (a different name
+from `DATABASE_URL` on purpose, so the tests can never be pointed at production
+by accident):
+
+```
+docker compose up -d db
+TEST_DATABASE_URL=postgres://tv_time:tv_time_dev@localhost:5432/tv_time npm test
+```
 
 For a fresh start, point `DATABASE_URL` at an empty PostgreSQL database and
 deploy the API. Its tables are created on startup. Do not import old Firestore

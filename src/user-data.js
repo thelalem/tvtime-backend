@@ -4,6 +4,7 @@ const { pool } = require('./db');
 const { getTvSeason, getTvShowClassificationData } = require('./tmdb');
 const { getUpcomingEpisodes } = require('./upcoming');
 const { hasAired, isValidTimeZone, localDateString } = require('./local-date');
+const { EPISODE_KEY, markEpisodes, mergeImportedActions, toMs } = require('./episode-merge');
 
 const router = express.Router();
 const classificationRefreshes = new Map();
@@ -360,6 +361,46 @@ const PROGRESS_COLUMNS = `series_id AS "seriesId",current_season AS "currentSeas
   classification,classification_checked_at AS "classificationCheckedAt",
   released_episode_count AS "releasedEpisodeCount",is_ended AS "isEnded"`;
 
+// The remembered unwatch dates for one show, as { 'S1E2': isoDate }. These live
+// in their own table and are read only by the episode-marking and import
+// endpoints, never by anything that draws a list of shows.
+async function loadUnwatched(db, uid, seriesId) {
+  const { rows } = await db.query(
+    `SELECT episode_key, unwatched_at FROM unwatched_episodes
+     WHERE firebase_uid=$1 AND series_id=$2`,
+    [uid, seriesId],
+  );
+  return Object.fromEntries(
+    rows.map((row) => [row.episode_key, new Date(row.unwatched_at).toISOString()]),
+  );
+}
+
+// Brings the stored unwatch dates from `before` to `after`.
+async function saveUnwatched(db, uid, seriesId, before, after) {
+  const removed = Object.keys(before).filter((key) => !(key in after));
+  const changed = Object.keys(after).filter((key) => before[key] !== after[key]);
+  if (removed.length) {
+    await db.query(
+      `DELETE FROM unwatched_episodes
+       WHERE firebase_uid=$1 AND series_id=$2 AND episode_key = ANY($3::text[])`,
+      [uid, seriesId, removed],
+    );
+  }
+  if (changed.length) {
+    await db.query(
+      `INSERT INTO unwatched_episodes(firebase_uid,series_id,episode_key,unwatched_at)
+       SELECT $1,$2,k,t FROM unnest($3::text[],$4::timestamptz[]) AS x(k,t)
+       ON CONFLICT(firebase_uid,series_id,episode_key)
+       DO UPDATE SET unwatched_at=EXCLUDED.unwatched_at`,
+      [uid, seriesId, changed, changed.map((key) => after[key])],
+    );
+  }
+}
+
+function plainObject(value) {
+  return value && typeof value === 'object' && !Array.isArray(value) ? { ...value } : {};
+}
+
 // One show's progress. The app used to download every show's progress and scan
 // for the one it wanted.
 router.get('/me/progress/:seriesId', async (request, response, next) => {
@@ -406,24 +447,24 @@ router.patch('/me/progress/:seriesId/episodes', async (request, response, next) 
       [request.user.uid, seriesId],
     );
     const existing = existingRows[0];
-    const episodes = new Set(Array.isArray(existing?.watched_episodes)
-      ? existing.watched_episodes.map(String) : []);
-    const dates = existing?.watched_episode_dates &&
-      typeof existing.watched_episode_dates === 'object' &&
-      !Array.isArray(existing.watched_episode_dates)
-      ? { ...existing.watched_episode_dates } : {};
+    const unwatchedBefore = await loadUnwatched(db, request.user.uid, seriesId);
     const now = new Date();
-    for (const key of keys) {
-      if (body.watched) {
-        if (!episodes.has(key)) {
-          episodes.add(key);
-          dates[key] = now.toISOString();
-        }
-      } else {
-        episodes.delete(key);
-        delete dates[key];
-      }
-    }
+    // Marking and unmarking in the app is the newest information there is, so
+    // it is applied without comparison. An unmark is also remembered, so an
+    // older import cannot bring the episode back.
+    const marked = markEpisodes(
+      {
+        watched: Array.isArray(existing?.watched_episodes)
+          ? existing.watched_episodes.map(String) : [],
+        dates: plainObject(existing?.watched_episode_dates),
+        unwatched: unwatchedBefore,
+      },
+      keys,
+      body.watched,
+      now.toISOString(),
+    );
+    const episodes = marked.watched;
+    const dates = marked.dates;
     const lastWatched = episodes.size === 0
       ? null : body.watched ? now : (existing?.last_watched ?? null);
     const totalEpisodes = Number.isInteger(body.totalEpisodes) && body.totalEpisodes >= 0
@@ -450,6 +491,116 @@ router.patch('/me/progress/:seriesId/episodes', async (request, response, next) 
       [request.user.uid, seriesId, body.currentSeason, body.currentEpisode,
        JSON.stringify([...episodes]), JSON.stringify(dates), episodes.size, totalEpisodes,
        lastWatched, optionalString(body.showName), optionalString(body.posterPath),
+       optionalString(body.backdropPath)],
+    );
+    await saveUnwatched(db, request.user.uid, seriesId, unwatchedBefore, marked.unwatched);
+    await db.query('COMMIT');
+    response.json(rows[0]);
+    scheduleClassificationRefresh(request.user.uid, rows[0].seriesId);
+  } catch (error) {
+    await db.query('ROLLBACK').catch(() => {});
+    next(error);
+  } finally {
+    db.release();
+  }
+});
+
+// Merges imported watch records (for example from a Trakt export) into one
+// show, newest date winning per episode - see episode-merge.js. Sent as
+// `{ actions: [{ key, watched, at }], totalEpisodes?, showName?, posterPath?,
+// backdropPath?, summary?: { plays, lastWatched } }`.
+//
+// Answers with the show's progress, or 204 when it ends up with no watched
+// episodes: a show with nothing watched has no progress row, exactly as before,
+// so it cannot appear in All Shows or count as tracked. What is remembered
+// about unwatched episodes is stored apart and is invisible there.
+//
+// Running the same request again changes nothing, so a client may retry it.
+router.post('/me/progress/:seriesId/import', async (request, response, next) => {
+  const seriesId = Number.parseInt(request.params.seriesId, 10);
+  const body = request.body || {};
+  const actions = body.actions;
+  const summary = body.summary;
+  if (!Number.isSafeInteger(seriesId) || seriesId <= 0 ||
+      !Array.isArray(actions) || actions.length > 5000 ||
+      !actions.every((action) => action && typeof action === 'object' &&
+        typeof action.key === 'string' && EPISODE_KEY.test(action.key) &&
+        typeof action.watched === 'boolean' && toMs(action.at) !== null) ||
+      !isOptionalCount(body.totalEpisodes) ||
+      (summary !== undefined && summary !== null &&
+        (typeof summary !== 'object' || !isOptionalCount(summary.plays) ||
+         !isOptionalDate(summary.lastWatched)))) {
+    return response.status(400).json({ error: 'invalid_import' });
+  }
+  const optionalString = (value) => (typeof value === 'string' ? value : null);
+  const db = await pool.connect().catch((error) => { next(error); return null; });
+  if (!db) return;
+  try {
+    await db.query('BEGIN');
+    await db.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))',
+      [`${request.user.uid}:${seriesId}`]);
+    const { rows: existingRows } = await db.query(
+      `SELECT watched_episodes, watched_episode_dates, last_watched, total_episodes,
+              current_season, current_episode
+       FROM show_progress WHERE firebase_uid=$1 AND series_id=$2`,
+      [request.user.uid, seriesId],
+    );
+    const existing = existingRows[0];
+    const unwatchedBefore = await loadUnwatched(db, request.user.uid, seriesId);
+    const merged = mergeImportedActions(
+      {
+        watched: Array.isArray(existing?.watched_episodes)
+          ? existing.watched_episodes.map(String) : [],
+        dates: plainObject(existing?.watched_episode_dates),
+        unwatched: unwatchedBefore,
+      },
+      actions,
+    );
+    await saveUnwatched(db, request.user.uid, seriesId, unwatchedBefore, merged.unwatched);
+
+    if (merged.watched.size === 0) {
+      if (existing) {
+        await db.query(
+          'DELETE FROM show_progress WHERE firebase_uid=$1 AND series_id=$2',
+          [request.user.uid, seriesId],
+        );
+      }
+      await db.query('COMMIT');
+      return response.status(204).end();
+    }
+
+    // The most recent activity: the newest watch date, any activity date
+    // already on file, and the export's own last-watched date for the show.
+    const candidates = [
+      ...Object.values(merged.dates).map(toMs),
+      toMs(existing?.last_watched),
+      summary && Number(summary.plays) > 0 ? toMs(summary.lastWatched) : null,
+    ].filter((ms) => ms !== null);
+    const lastWatched = candidates.length ? new Date(Math.max(...candidates)) : null;
+    const totalEpisodes = Number.isInteger(body.totalEpisodes) && body.totalEpisodes > 0
+      ? body.totalEpisodes : (existing?.total_episodes ?? 0);
+
+    const { rows } = await db.query(
+      `INSERT INTO show_progress(firebase_uid,series_id,current_season,current_episode,
+        watched_episodes,watched_episode_dates,watched_count,total_episodes,last_watched,
+        show_name,poster_path,backdrop_path,classification,classification_checked_at,
+        released_episode_count,is_ended)
+       VALUES ($1,$2,$3,$4,$5::jsonb,$6::jsonb,$7,$8,$9,$10,$11,$12,NULL,NULL,0,FALSE)
+       ON CONFLICT(firebase_uid,series_id) DO UPDATE SET
+        watched_episodes=EXCLUDED.watched_episodes,
+        watched_episode_dates=EXCLUDED.watched_episode_dates,
+        watched_count=EXCLUDED.watched_count,total_episodes=EXCLUDED.total_episodes,
+        last_watched=EXCLUDED.last_watched,
+        show_name=COALESCE(EXCLUDED.show_name,show_progress.show_name),
+        poster_path=COALESCE(EXCLUDED.poster_path,show_progress.poster_path),
+        backdrop_path=COALESCE(EXCLUDED.backdrop_path,show_progress.backdrop_path),
+        classification=NULL,classification_checked_at=NULL,
+        released_episode_count=0,is_ended=FALSE,updated_at=NOW()
+       RETURNING ${PROGRESS_COLUMNS}`,
+      [request.user.uid, seriesId, existing?.current_season ?? 1,
+       existing?.current_episode ?? 1, JSON.stringify([...merged.watched]),
+       JSON.stringify(merged.dates), merged.watched.size, totalEpisodes, lastWatched,
+       optionalString(body.showName), optionalString(body.posterPath),
        optionalString(body.backdropPath)],
     );
     await db.query('COMMIT');
@@ -521,6 +672,10 @@ router.delete('/me/progress/:seriesId', async (request, response, next) => {
   }
   try {
     await pool.query('DELETE FROM show_progress WHERE firebase_uid=$1 AND series_id=$2',
+      [request.user.uid, seriesId]);
+    // Deleting a show's history on purpose also forgets what was unmarked, so
+    // an import can restore it.
+    await pool.query('DELETE FROM unwatched_episodes WHERE firebase_uid=$1 AND series_id=$2',
       [request.user.uid, seriesId]);
     response.status(204).end();
   } catch (error) { next(error); }
