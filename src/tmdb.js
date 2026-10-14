@@ -318,6 +318,20 @@ async function getShowImdbRating(showId, knownImdbId) {
   );
 }
 
+// How long a response will wait for IMDb before settling for the TMDB rating.
+// The lookup is not cancelled: it keeps running and fills the cache, so the next
+// request gets the IMDb value instantly. Without this one slow OMDb call held a
+// whole page of 20 shows for up to the provider's 15 s timeout.
+const imdbRatingWaitMs = 2000;
+
+function imdbRatingWithin(showId, knownImdbId) {
+  const lookup = getShowImdbRating(showId, knownImdbId).catch(() => null);
+  return Promise.race([
+    lookup,
+    delay(imdbRatingWaitMs).then(() => null),
+  ]);
+}
+
 // Replaces `vote_average` on each show of a TMDB list response with its IMDb
 // rating, so every client shows IMDb without knowing about it. The TMDB value
 // is kept as `tmdb_vote_average`; a show IMDb has no rating for keeps TMDB's.
@@ -325,7 +339,7 @@ async function withImdbRatings(list) {
   if (!config.omdbApiKey || !list || !Array.isArray(list.results)) return list;
   const results = await Promise.all(list.results.map(async (show) => {
     if (!show || !Number.isInteger(show.id)) return show;
-    const rating = await getShowImdbRating(show.id).catch(() => null);
+    const rating = await imdbRatingWithin(show.id);
     return rating == null
       ? show
       : { ...show, tmdb_vote_average: show.vote_average, vote_average: rating };
@@ -337,7 +351,7 @@ async function withImdbRatings(list) {
 async function withImdbRating(show) {
   if (!show || !Number.isInteger(show.id)) return show;
   const imdbId = show.external_ids && show.external_ids.imdb_id;
-  const rating = await getShowImdbRating(show.id, imdbId).catch(() => null);
+  const rating = await imdbRatingWithin(show.id, imdbId);
   return rating == null
     ? show
     : { ...show, tmdb_vote_average: show.vote_average, vote_average: rating };
