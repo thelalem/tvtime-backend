@@ -5,6 +5,7 @@ const { getTvSeason, getTvShowClassificationData, withImdbRatings } = require('.
 const { getUpcomingEpisodes } = require('./upcoming');
 const { getRecommendations, invalidateRecommendations } = require('./recommendations');
 const { registerMeMovieRoutes } = require('./me-movies');
+const { clearShowState, loadShowStates, registerShowStateRoutes } = require('./show-states');
 const { hasAired, isValidTimeZone, localDateString } = require('./local-date');
 const { EPISODE_KEY, markEpisodes, mergeImportedActions, toMs } = require('./episode-merge');
 
@@ -54,6 +55,7 @@ router.use(async (request, response, next) => {
 // Movie routes first: the generic `/me/:collection/:seriesId` routes below would answer these
 // paths with a 404.
 registerMeMovieRoutes(router);
+registerShowStateRoutes(router);
 
 router.get('/me', async (request, response, next) => {
   try {
@@ -157,7 +159,7 @@ router.get('/me/progress', async (request, response, next) => {
 
 router.get('/me/watchlist-view', async (request, response, next) => {
   try {
-    const [watchlistResult, progressResult] = await Promise.all([
+    const [watchlistResult, progressResult, states] = await Promise.all([
       pool.query(
         `SELECT series AS data, added_at AS "addedAt" FROM watchlist
          WHERE firebase_uid=$1 ORDER BY added_at DESC`,
@@ -175,7 +177,11 @@ router.get('/me/watchlist-view', async (request, response, next) => {
          FROM show_progress WHERE firebase_uid=$1 ORDER BY updated_at DESC`,
         [request.user.uid],
       ),
+      loadShowStates(pool, request.user.uid),
     ]);
+    // Stopped and removed shows are off the watchlist, so only their progress rows could bring
+    // them into All Shows; removed ones stay out, stopped ones get their own section below.
+    const inactive = (id) => states.removed.has(Number(id)) || states.stopped.has(Number(id));
     const progressById = new Map(
       progressResult.rows.map((row) => [
         seriesKey(row.seriesId),
@@ -210,6 +216,7 @@ router.get('/me/watchlist-view', async (request, response, next) => {
     }
     for (const progress of progressResult.rows) {
       if (includedIds.has(seriesKey(progress.seriesId))) continue;
+      if (inactive(progress.seriesId)) continue;
       allShows.push({
         show: {
           id: progress.seriesId,
@@ -223,6 +230,37 @@ router.get('/me/watchlist-view', async (request, response, next) => {
         progress: !hasWatchedProgress(progress)
           ? { ...progress, classification: 'unstarted', lastWatched: null }
           : progress,
+      });
+    }
+    for (const [id, { series }] of states.stopped) {
+      const progress = progressById.get(seriesKey(id));
+      allShows.push({
+        show: {
+          ...series,
+          id,
+          name: series.name || progress?.showName || 'TV show',
+          posterPath: series.posterPath ?? progress?.posterPath ?? null,
+          backdropPath: series.backdropPath ?? progress?.backdropPath ?? null,
+        },
+        progress: {
+          ...(progress || {
+            seriesId: id,
+            currentSeason: 1,
+            currentEpisode: 1,
+            watchedEpisodes: [],
+            watchedEpisodeDates: {},
+            watchedCount: 0,
+            totalEpisodes: 0,
+            lastWatched: null,
+            showName: series.name,
+            posterPath: series.posterPath,
+            backdropPath: series.backdropPath,
+            classificationCheckedAt: null,
+            releasedEpisodeCount: 0,
+            isEnded: false,
+          }),
+          classification: 'stopped',
+        },
       });
     }
     response.json({
@@ -350,6 +388,9 @@ router.put('/me/:collection/:seriesId', async (request, response, next) => {
        RETURNING series AS data, added_at AS "addedAt"`,
       [request.user.uid, seriesId, JSON.stringify(data)],
     );
+    // Adding a stopped or removed show back (from search, or by ticking an episode) makes it an
+    // ordinary watchlist show again, with its progress.
+    if (table === 'watchlist') await clearShowState(pool, request.user.uid, seriesId);
     invalidateRecommendations(request.user.uid);
     response.json({ ...rows[0].data, addedAt: rows[0].addedAt });
   } catch (error) { next(error); }

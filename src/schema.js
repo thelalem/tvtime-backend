@@ -99,6 +99,17 @@ async function initializeDatabase() {
       PRIMARY KEY (firebase_uid, movie_id)
     );
 
+    -- Shows the user stopped watching or removed (see show-states.js). Their progress stays in
+    -- show_progress; this only takes them out of the lists. The series column is the show as last drawn.
+    CREATE TABLE IF NOT EXISTS show_states (
+      firebase_uid TEXT NOT NULL REFERENCES app_users(firebase_uid) ON DELETE CASCADE,
+      series_id BIGINT NOT NULL,
+      state TEXT NOT NULL CHECK (state IN ('stopped', 'removed')),
+      series JSONB NOT NULL,
+      changed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      PRIMARY KEY (firebase_uid, series_id)
+    );
+
     -- Sequels the user chose to hide from their Upcoming list (see sequels.js).
     CREATE TABLE IF NOT EXISTS dismissed_sequels (
       firebase_uid TEXT NOT NULL REFERENCES app_users(firebase_uid) ON DELETE CASCADE,

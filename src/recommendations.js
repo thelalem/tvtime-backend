@@ -66,7 +66,7 @@ function pruneCache() {
 }
 
 async function loadHistory(uid) {
-  const [watchlist, favorites, progress] = await Promise.all([
+  const [watchlist, favorites, progress, states] = await Promise.all([
     pool.query('SELECT series_id, added_at FROM watchlist WHERE firebase_uid = $1', [uid]),
     pool.query('SELECT series_id FROM favorites WHERE firebase_uid = $1', [uid]),
     pool.query(
@@ -74,11 +74,16 @@ async function loadHistory(uid) {
        FROM show_progress WHERE firebase_uid = $1`,
       [uid],
     ),
+    pool.query('SELECT series_id FROM show_states WHERE firebase_uid = $1', [uid]),
   ]);
+  // A show the user stopped watching or removed is a weak signal at best, so it is not a seed;
+  // it is still known (see `known` below), so it is never suggested back to them.
+  const inactive = new Set(states.rows.map((row) => Number(row.series_id)));
   return {
     watchlist: watchlist.rows,
-    favorites: favorites.rows,
-    progress: progress.rows,
+    favorites: favorites.rows.filter((row) => !inactive.has(Number(row.series_id))),
+    progress: progress.rows.filter((row) => !inactive.has(Number(row.series_id))),
+    inactive,
   };
 }
 
@@ -115,6 +120,7 @@ async function buildRankedList(uid) {
   // Everything the user already has is excluded from the suggestions.
   const known = new Set(weights.keys());
   for (const row of history.progress) known.add(Number(row.series_id));
+  for (const id of history.inactive || []) known.add(id);
 
   const seeds = [...weights.entries()]
     .sort((a, b) => b[1] - a[1])

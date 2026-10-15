@@ -84,6 +84,13 @@ The PostgreSQL tables are created on startup. User-data endpoints live under
     ones with no release date are left out. `PUT` / `DELETE /api/v1/me/movies/sequels/:movieId/dismissed`
     hides / restores one. Collections are TMDB's own, so a sequel TMDB files elsewhere does not appear.
   - `GET /api/v1/me/movies/stats` returns `{ watchedCount, watchedMinutes }` for the profile.
+- `GET /api/v1/me/shows/:showId/state` returns `{ state }`: `watchlist`, `stopped`, `removed`
+  or `none`. `PUT /api/v1/me/shows/:showId/stopped` (Stop watching) and `PUT .../removed`
+  (Remove) take the show document as the body, take it off the watchlist and keep its progress.
+  A stopped show is listed in `watchlist-view`'s `allShows` with `classification: "stopped"`; a
+  removed one is in no list. Both are left out of Upcoming and the recommendation seeds.
+  `DELETE /api/v1/me/shows/:showId/stopped` (Continue watching) puts it back on the watchlist;
+  `PUT /me/watchlist/:showId` clears either state too.
 - `GET /api/v1/me/favorites` and `PUT`, `DELETE /api/v1/me/favorites/:showId`
 - `GET /api/v1/me/progress` and `PUT`, `DELETE /api/v1/me/progress/:showId`
 - `GET /api/v1/me/progress/:showId` returns one show's progress (404 if none).
