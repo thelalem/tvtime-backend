@@ -91,6 +91,7 @@ The PostgreSQL tables are created on startup. User-data endpoints live under
   removed one is in no list. Both are left out of Upcoming and the recommendation seeds.
   `DELETE /api/v1/me/shows/:showId/stopped` (Continue watching) puts it back on the watchlist;
   `PUT /me/watchlist/:showId` clears either state too.
+- `GET /api/v1/me/show-states` returns `{ stopped: [ids], removed: [ids] }`.
 - `GET /api/v1/me/favorites` and `PUT`, `DELETE /api/v1/me/favorites/:showId`
 - `GET /api/v1/me/progress` and `PUT`, `DELETE /api/v1/me/progress/:showId`
 - `GET /api/v1/me/progress/:showId` returns one show's progress (404 if none).

@@ -49,6 +49,15 @@ function parseSeriesId(value) {
 }
 
 function registerShowStateRoutes(router) {
+  // Every stopped and removed show id, so the app's add/check buttons do not count them as
+  // tracked just because they have progress. Registered before `/me/:collection`.
+  router.get('/me/show-states', async (request, response, next) => {
+    try {
+      const { stopped, removed } = await loadShowStates(pool, request.user.uid);
+      response.json({ stopped: [...stopped.keys()], removed: [...removed] });
+    } catch (error) { next(error); }
+  });
+
   // What the show details page's menu needs: on the watchlist, stopped, removed, or none of these.
   router.get('/me/shows/:seriesId/state', async (request, response, next) => {
     const seriesId = parseSeriesId(request.params.seriesId);

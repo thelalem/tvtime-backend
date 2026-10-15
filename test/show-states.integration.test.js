@@ -155,6 +155,18 @@ test('a stopped show can be removed for good', async () => {
   assert.deepEqual(allShowIds(await view(uid)), []);
 });
 
+test('the stopped and removed ids are listed together', async () => {
+  const uid = newUser();
+  await add(uid, 70, 'Seventy');
+  await add(uid, 71, 'Seventy-one');
+  await add(uid, 72, 'Seventy-two');
+  await api(uid, 'PUT', '/me/shows/70/stopped', show(70, 'Seventy'));
+  await api(uid, 'PUT', '/me/shows/71/removed', show(71, 'Seventy-one'));
+  const listed = await api(uid, 'GET', '/me/show-states');
+  assert.equal(listed.status, 200);
+  assert.deepEqual(listed.body, { stopped: [70], removed: [71] });
+});
+
 test('a show the user never had reads as none; bad requests are refused', async () => {
   const uid = newUser();
   assert.equal(await state(uid, 50), 'none');
