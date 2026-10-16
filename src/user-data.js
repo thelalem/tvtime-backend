@@ -12,7 +12,10 @@ const { hasAired, isValidTimeZone, localDateString } = require('./local-date');
 const { EPISODE_KEY, markEpisodes, mergeImportedActions, toMs } = require('./episode-merge');
 const { sendJsonWithEtag } = require('./etag');
 
-const router = express.Router();
+// Case-sensitive, like the sign-in check below: Express matched /ME/watchlist
+// to the /me routes by default, past the check that only looks at /me/, and
+// the handler then failed for want of a user.
+const router = express.Router({ caseSensitive: true });
 const classificationRefreshes = new Map();
 // The one extra run queued behind a running refresh (see refreshClassificationOnce).
 const classificationFollowUps = new Map();
@@ -508,7 +511,10 @@ router.patch('/me/progress/:seriesId/episodes', async (request, response, next) 
       typeof body.watched !== 'boolean' ||
       !Array.isArray(keys) || keys.length === 0 || keys.length > 5000 ||
       !keys.every((key) => typeof key === 'string' && /^S\d{1,4}E\d{1,5}$/.test(key)) ||
-      !Number.isInteger(body.currentSeason) || !Number.isInteger(body.currentEpisode)) {
+      !Number.isInteger(body.currentSeason) || !Number.isInteger(body.currentEpisode) ||
+      // Bounded: a number past Postgres's integer range failed as a 500 with SQL in it.
+      body.currentSeason < 0 || body.currentSeason > 9999 ||
+      body.currentEpisode < 0 || body.currentEpisode > 9999) {
     return response.status(400).json({ error: 'invalid_episodes' });
   }
   const optionalString = (value) => (typeof value === 'string' ? value : null);

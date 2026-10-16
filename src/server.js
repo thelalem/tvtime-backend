@@ -23,6 +23,8 @@ const { registerPublicMovieRoutes } = require('./movies');
 const { startNotificationSweeps } = require('./notifications');
 
 const app = express();
+// As the /me router: /ME/... must not reach routes meant for /me/....
+app.set('case sensitive routing', true);
 app.use(cors({
   origin(origin, callback) {
     if (!origin) return callback(null, true);
@@ -103,12 +105,26 @@ app.get('/api/v1/shows/trending', async (request, response, next) => {
   try { response.json(await withImdbRatings(await getDiscovery('trending', { page: discoveryPage(request.query.page) }))); } catch (error) { next(error); }
 });
 
+// TMDB's sort orders for /discover/tv. Anything else was passed on and came
+// back from TMDB as an error.
+const discoverSortOrders = new Set([
+  'popularity.desc', 'popularity.asc', 'vote_average.desc', 'vote_average.asc',
+  'vote_count.desc', 'vote_count.asc', 'first_air_date.desc', 'first_air_date.asc',
+  'name.asc', 'name.desc',
+]);
+
 app.get('/api/v1/shows/discover', async (request, response, next) => {
+  const sortBy = request.query.sort_by === undefined ? 'popularity.desc' : request.query.sort_by;
+  const genres = request.query.with_genres;
+  if (typeof sortBy !== 'string' || !discoverSortOrders.has(sortBy) ||
+      (genres !== undefined && (typeof genres !== 'string' || !/^\d{1,6}([,|]\d{1,6}){0,19}$/.test(genres)))) {
+    return response.status(400).json({ detail: 'invalid sort_by or with_genres' });
+  }
   try {
     response.json(await getDiscovery('discover', {
-      with_genres: request.query.with_genres,
-      sort_by: request.query.sort_by || 'popularity.desc',
-      page: request.query.page || 1,
+      with_genres: genres,
+      sort_by: sortBy,
+      page: discoveryPage(request.query.page),
     }));
   } catch (error) { next(error); }
 });
@@ -162,8 +178,19 @@ app.get('/api/v1/providers/tvmaze/episodes', async (request, response, next) => 
 
 registerPublicMovieRoutes(app);
 
-app.use((error, _request, response, _next) => {
-  response.status(error.status || 500).json({ detail: error.message || 'Internal server error' });
+app.use((error, request, response, _next) => {
+  const status = error.status || 500;
+  // An unexpected error's message (a Postgres error carries SQL) stays in the
+  // log. Errors this code raised on purpose (400s, provider 502/503/504) keep
+  // theirs: the app shows or logs them.
+  if (status >= 500 && !error.status) {
+    console.error(`[${request.method} ${request.path}] ${error.stack || error.message}`);
+  }
+  response.status(status).json({
+    detail: status >= 500 && !error.status
+      ? 'Internal server error'
+      : error.message || 'Internal server error',
+  });
 });
 
 let server;
@@ -187,10 +214,13 @@ async function start() {
   });
 }
 
-start().catch((error) => {
-  console.error('Failed to initialize API', error);
-  process.exit(1);
-});
+// Started only when run (`npm start`), so tests can load the app on its own.
+if (require.main === module) {
+  start().catch((error) => {
+    console.error('Failed to initialize API', error);
+    process.exit(1);
+  });
+}
 
 async function shutdown() {
   if (!server) {
@@ -205,3 +235,5 @@ async function shutdown() {
 
 process.on('SIGTERM', shutdown);
 process.on('SIGINT', shutdown);
+
+module.exports = { app };

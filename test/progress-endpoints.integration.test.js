@@ -454,3 +454,11 @@ test('choosing a day for an episode that is already watched changes its date', a
   const again = await api(uid, 'PATCH', `/me/progress/${SHOW}/episodes`, { episodeKeys: ['S1E1'], watched: true, currentSeason: 1, currentEpisode: 1 });
   assert.equal(new Date(again.body.watchedEpisodeDates.S1E1).toISOString(), '2026-01-02T12:00:00.000Z');
 });
+
+test('season and episode numbers past 9999 are refused, not a 500', async () => {
+  const uid = newUser();
+  const response = await api(uid, 'PATCH', `/me/progress/${SHOW}/episodes`, {
+    episodeKeys: ['S1E1'], watched: true, currentSeason: 99999999999, currentEpisode: 1,
+  });
+  assert.equal(response.status, 400);
+});
