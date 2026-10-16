@@ -15,9 +15,19 @@ const stubs = {
   './firebase': {
     admin: { auth: () => ({ verifyIdToken: async (token) => ({ uid: token, email: `${token}@example.test` }) }) },
   },
+  // Shows 900 and up have one aired season of three episodes, so the classification refresh
+  // sees them as started and not caught up; the rest have no episodes.
   './tmdb': {
-    getTvSeason: async () => ({ season_number: 1, episodes: [] }),
-    getTvShowClassificationData: async () => ({ seasons: [], status: 'Returning Series' }),
+    getTvSeason: async (id) => ({
+      season_number: 1,
+      episodes: id >= 900
+        ? [1, 2, 3].map((n) => ({ episode_number: n, air_date: '2020-01-0' + n }))
+        : [],
+    }),
+    getTvShowClassificationData: async (id) => ({
+      seasons: id >= 900 ? [{ season_number: 1 }] : [],
+      status: 'Returning Series',
+    }),
   },
   './upcoming': { getUpcomingEpisodes: async () => [] },
 };
@@ -30,7 +40,7 @@ Module._load = function load(request, parent, ...rest) {
 const express = require('express');
 const { pool } = require('../src/db');
 const { initializeDatabase } = require('../src/schema');
-const { router } = require('../src/user-data');
+const { refreshStaleClassifications, router } = require('../src/user-data');
 
 const users = [];
 let server;
@@ -183,4 +193,28 @@ test('another user is not affected', async () => {
   await api(one, 'PUT', '/me/shows/60/removed', show(60, 'Sixty'));
   assert.equal(await state(two, 60), 'watchlist');
   assert.deepEqual(watchlistIds(await view(two)), [60]);
+});
+
+test('the classification sweep does not put a stopped or removed show back on the watchlist', async () => {
+  const uid = newUser();
+  for (const [id, name] of [[900, 'Stopped'], [901, 'Removed'], [902, 'Dropped off']]) {
+    await add(uid, id, name);
+    await watch(uid, id, name);
+  }
+  // Let the refreshes the progress writes started settle first.
+  await new Promise((resolve) => setTimeout(resolve, 300));
+  await api(uid, 'PUT', '/me/shows/900/stopped', show(900, 'Stopped'));
+  await api(uid, 'PUT', '/me/shows/901/removed', show(901, 'Removed'));
+  // Control: off the watchlist with no state, started and not caught up, so the sweep re-adds it.
+  await pool.query('DELETE FROM watchlist WHERE firebase_uid=$1 AND series_id=902', [uid]);
+  await pool.query(
+    'UPDATE show_progress SET classification_checked_at=NULL WHERE firebase_uid=$1',
+    [uid],
+  );
+
+  await refreshStaleClassifications();
+
+  assert.deepEqual(watchlistIds(await view(uid)), [902], 'only the show with no state comes back');
+  assert.equal(await state(uid, 900), 'stopped');
+  assert.equal(await state(uid, 901), 'removed');
 });

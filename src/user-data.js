@@ -991,9 +991,14 @@ async function refreshClassification(uid, seriesId) {
       rating: Number(show.vote_average || 0),
       firstAirDate: show.first_air_date || '',
     };
+    // A stopped or removed show (show-states.js) stays off the watchlist: only
+    // the user puts it back. Checked in the INSERT itself, so a refresh that
+    // started before the user stopped the show cannot re-add it either.
     await pool.query(
       `INSERT INTO watchlist(firebase_uid,series_id,series)
-       VALUES ($1,$2,$3::jsonb)
+       SELECT $1,$2,$3::jsonb
+       WHERE NOT EXISTS (SELECT 1 FROM show_states s
+                         WHERE s.firebase_uid=$1 AND s.series_id=$2)
        ON CONFLICT(firebase_uid,series_id) DO NOTHING`,
       [uid, seriesId, JSON.stringify(series)],
     );

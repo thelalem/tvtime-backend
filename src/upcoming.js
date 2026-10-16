@@ -304,7 +304,13 @@ async function getUpcomingEpisodes({ uid, today, forceRefresh = false, pool }) {
     throw error;
   }
   const [watchlistResult, progressResult] = await Promise.all([
-    pool.query('SELECT series AS data FROM watchlist WHERE firebase_uid=$1', [uid]),
+    pool.query(
+      `SELECT w.series AS data FROM watchlist w
+       WHERE w.firebase_uid=$1
+         AND NOT EXISTS (SELECT 1 FROM show_states s
+                         WHERE s.firebase_uid=w.firebase_uid AND s.series_id=w.series_id)`,
+      [uid],
+    ),
     // A show the user stopped watching or removed (show-states.js) has no upcoming episodes for
     // them, even though its progress is kept.
     pool.query(
