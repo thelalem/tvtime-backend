@@ -98,7 +98,13 @@ async function requestJson(url, options = {}, unavailableMessage = 'Provider is 
   if (!response.ok) {
     // Keep the upstream status on the error so callers can tell a retryable
     // 429 from a permanent 404 — both used to arrive as an opaque 502.
-    const error = providerError('Provider request failed', 502);
+    // A 404 (an id TMDB does not know) is passed on as 404. Reported as 502 it
+    // looked like an outage: the app could not tell it from a server error, and
+    // the Trakt import saved shows without their poster when it was really the
+    // server that had hiccupped.
+    const error = response.status === 404
+      ? providerError('Not found', 404)
+      : providerError('Provider request failed', 502);
     error.providerStatus = response.status;
     const retryAfter = Number(response.headers.get('retry-after'));
     if (Number.isFinite(retryAfter) && retryAfter > 0) {

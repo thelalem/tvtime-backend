@@ -67,3 +67,11 @@ test('TVMaze not knowing a show is cached', async () => {
   assert.equal(await tmdb.getTvMazeShow('Unknown'), null);
   assert.equal(requests, asked, 'not asked twice');
 });
+
+test('an id TMDB does not know is answered 404, not 502 like an outage', async () => {
+  const tmdb = freshTmdb();
+  answers = [404];
+  await assert.rejects(tmdb.getTvShow(999999), (error) => error.status === 404);
+  answers = [503, 503, 503];
+  await assert.rejects(tmdb.getTvShow(999998), (error) => error.status === 502);
+});
