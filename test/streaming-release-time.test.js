@@ -1,6 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { streamingReleaseTime } = require('../src/upcoming');
+const { releaseDateFor, streamingReleaseTime } = require('../src/upcoming');
 const { zonedDateTimeToUtc } = require('../src/local-date');
 
 // Tulsa King as TVMaze returned it (Oct 2026): Paramount+, no air time.
@@ -30,11 +30,19 @@ test('Disney+ releases at 21:00 New York time, 01:00 UTC the next day in summer'
   assert.equal(zonedDateTimeToUtc('2026-12-08', airTime, timezone).toISOString(), '2026-12-09T02:00:00.000Z');
 });
 
-test('Apple TV releases at 21:00 New York time the evening before the listed date', () => {
+test("Apple TV releases at 21:00 New York time on TMDB's date, the day before TVMaze's", () => {
   for (const name of ['Apple TV', 'Apple TV+']) {
     assert.deepEqual(streamingReleaseTime({ ...tulsaKing, webChannel: { name } }),
-      { airTime: '21:00', timezone: 'America/New_York', dayOffset: -1 }, name);
+      { airTime: '21:00', timezone: 'America/New_York', tvMazeDayOffset: -1 }, name);
   }
+  const apple = streamingReleaseTime({ ...tulsaKing, webChannel: { name: 'Apple TV' } });
+  // Dark Matter 2x09: TMDB Thursday 22 October 2026, TVMaze Friday the 23rd.
+  assert.equal(releaseDateFor(apple, '2026-10-22', '2026-10-23'), '2026-10-22');
+  assert.equal(releaseDateFor(apple, '2026-10-22', undefined), '2026-10-22', 'no TVMaze episode');
+  assert.equal(releaseDateFor(apple, null, '2026-10-23'), '2026-10-22', 'no TMDB date');
+  // Other services keep the air date.
+  assert.equal(releaseDateFor(streamingReleaseTime(tulsaKing), '2026-10-16', '2026-10-16'), '2026-10-16');
+  assert.equal(releaseDateFor(null, '2026-10-21', '2026-10-21'), '2026-10-21');
   // Severance 2x01, listed Friday 17 January 2025, out Thursday the 16th at 21:00 EST.
   assert.equal(zonedDateTimeToUtc('2025-01-16', '21:00', 'America/New_York').toISOString(), '2025-01-17T02:00:00.000Z');
 });

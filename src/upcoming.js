@@ -42,8 +42,9 @@ const tvMazeEnrichmentTimeoutMs = 5000;
 // at midnight Pacific, 3 a.m. Eastern: 07:00 UTC in summer, 08:00 in winter, so
 // the time is kept in New York's zone rather than as a fixed UTC hour. Disney+
 // releases at 9 p.m. Eastern on the listed date. Apple TV releases at 9 p.m.
-// Eastern the evening before the date TVMaze and TMDB list (Severance 2x01:
-// listed Friday 17 January 2025, out Thursday the 16th), so its day moves back.
+// Eastern on the date TMDB lists, which TVMaze lists as the next day (Severance
+// 2x01: TMDB Thursday 16 January 2025, TVMaze Friday the 17th), so a date taken
+// from TVMaze moves back a day.
 const earlyMorning = { airTime: '03:00', timezone: 'America/New_York' };
 const streamingReleaseTimes = new Map([
   ['paramount+', earlyMorning],
@@ -53,8 +54,8 @@ const streamingReleaseTimes = new Map([
   ['hulu', earlyMorning],
   ['peacock', earlyMorning],
   ['disney+', { airTime: '21:00', timezone: 'America/New_York' }],
-  ['apple tv', { airTime: '21:00', timezone: 'America/New_York', dayOffset: -1 }],
-  ['apple tv+', { airTime: '21:00', timezone: 'America/New_York', dayOffset: -1 }],
+  ['apple tv', { airTime: '21:00', timezone: 'America/New_York', tvMazeDayOffset: -1 }],
+  ['apple tv+', { airTime: '21:00', timezone: 'America/New_York', tvMazeDayOffset: -1 }],
 ]);
 
 /// The usual release time of a show TVMaze has no air time for, or null.
@@ -62,6 +63,15 @@ function streamingReleaseTime(tvMazeShow) {
   if (!tvMazeShow || tvMazeShow.schedule?.time || tvMazeShow.network) return null;
   const name = String(tvMazeShow.webChannel?.name || '').trim().toLowerCase();
   return streamingReleaseTimes.get(name) || null;
+}
+
+/// The date the air time falls on: TVMaze's date moved by the service's offset when TVMaze has
+/// the episode, otherwise the air date (TMDB's, already the US release day for Apple TV).
+function releaseDateFor(releaseTime, airDate, tvMazeAirDate) {
+  if (releaseTime?.tvMazeDayOffset && isDate(tvMazeAirDate)) {
+    return addDays(tvMazeAirDate, releaseTime.tvMazeDayOffset);
+  }
+  return airDate;
 }
 
 /// [date] (YYYY-MM-DD) moved by [days] calendar days.
@@ -359,9 +369,10 @@ async function buildSeriesUpcoming(show, { data, episodes }, today, forceRefresh
       timezone: schedule.timezone || network?.country?.timezone || releaseTime?.timezone || null,
       // True when the time is the service's usual release time, not one TVMaze published.
       airTimeEstimated: releaseTime != null,
-      // The date in `timezone` that `airTime` falls on. Usually the air date; for Apple TV the
-      // evening before it. Older apps ignore it and use the air date.
-      releaseDate: addDays(episodeData.airDate, releaseTime?.dayOffset || 0),
+      // The date in `timezone` that `airTime` falls on. The air date, except where the service's
+      // date is taken from TVMaze's listing and that runs a day late (Apple TV). Older apps
+      // ignore it and use the air date.
+      releaseDate: releaseDateFor(releaseTime, episodeData.airDate, matchingTvMaze?.airdate),
       // False when TVMaze could not be asked: no air time means "unknown yet",
       // not "streaming, no time" (notifications.js, announceAt).
       tvMazeAnswered,
@@ -437,4 +448,4 @@ async function getUpcomingEpisodes({ uid, today, forceRefresh = false, pool }) {
   });
 }
 
-module.exports = { getUpcomingEpisodes, streamingReleaseTime };
+module.exports = { getUpcomingEpisodes, releaseDateFor, streamingReleaseTime };
