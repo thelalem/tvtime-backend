@@ -17,6 +17,7 @@ const {
   searchTv,
   withImdbRating,
   withImdbRatings,
+  getTvShowClassificationData,
 } = require('./tmdb');
 const { getSimilarShows } = require('./similar');
 const { registerPublicMovieRoutes } = require('./movies');
@@ -144,6 +145,25 @@ app.param('seasonNumber', (_request, response, next, value) => {
 
 app.get('/api/v1/shows/:showId', async (request, response, next) => {
   try { response.json(await withImdbRating(await getTvShow(request.params.showId))); } catch (error) { next(error); }
+});
+
+// The few fields a Trakt import stores for a show. The full route above is
+// 250-600 KB (the whole run's cast, videos, providers) and asks OMDb for the
+// IMDb rating; an import of a few hundred shows downloaded all of it and spent
+// a third of the day's OMDb budget. The rating here is TMDB's.
+app.get('/api/v1/shows/:showId/summary', async (request, response, next) => {
+  try {
+    const show = await getTvShowClassificationData(request.params.showId);
+    response.json({
+      id: show.id,
+      name: show.name,
+      overview: show.overview || '',
+      poster_path: show.poster_path || null,
+      backdrop_path: show.backdrop_path || null,
+      vote_average: show.vote_average || 0,
+      first_air_date: show.first_air_date || '',
+    });
+  } catch (error) { next(error); }
 });
 
 app.get('/api/v1/shows/:showId/similar', async (request, response, next) => {
