@@ -11,6 +11,7 @@ if (!url) {
 }
 process.env.DATABASE_URL = url;
 
+let classificationGate = Promise.resolve();
 const stubs = {
   './firebase': {
     admin: { auth: () => ({ verifyIdToken: async (token) => ({ uid: token, email: `${token}@example.test` }) }) },
@@ -24,10 +25,11 @@ const stubs = {
         ? [1, 2, 3].map((n) => ({ episode_number: n, air_date: '2020-01-0' + n }))
         : [],
     }),
-    getTvShowClassificationData: async (id) => ({
-      seasons: id >= 900 ? [{ season_number: 1 }] : [],
-      status: 'Returning Series',
-    }),
+    getTvShowClassificationData: async (id) => {
+      // Shows 960 and up wait here, so a test can hold a refresh mid-way.
+      if (id >= 960) await classificationGate;
+      return { seasons: id >= 900 ? [{ season_number: 1 }] : [], status: 'Returning Series' };
+    },
   },
   './upcoming': { getUpcomingEpisodes: async () => [] },
 };
@@ -217,4 +219,28 @@ test('the classification sweep does not put a stopped or removed show back on th
   assert.deepEqual(watchlistIds(await view(uid)), [902], 'only the show with no state comes back');
   assert.equal(await state(uid, 900), 'stopped');
   assert.equal(await state(uid, 901), 'removed');
+});
+
+test('a change made while a refresh is running gets the last word', async () => {
+  const uid = newUser();
+  const tick = (keys, watched) => api(uid, 'PATCH', '/me/progress/960/episodes', {
+    episodeKeys: keys, watched, currentSeason: 1, currentEpisode: 1, totalEpisodes: 3,
+  });
+  const settle = () => new Promise((resolve) => setTimeout(resolve, 400));
+  await add(uid, 960, 'Held');
+  assert.equal((await tick(['S1E1', 'S1E2'], true)).status, 200);
+  await settle();
+
+  let release;
+  classificationGate = new Promise((resolve) => { release = resolve; });
+  assert.equal((await tick(['S1E3'], true)).status, 200); // refresh A starts: all 3 watched
+  await settle(); // A has read the progress and is waiting
+  assert.equal((await tick(['S1E3'], false)).status, 200); // unticked while A runs
+  release();
+  await settle();
+  classificationGate = Promise.resolve();
+
+  const body = await view(uid);
+  assert.deepEqual(watchlistIds(body), [960], 'still on the watchlist: not caught up');
+  assert.equal(body.allShows.find((e) => Number(e.show.id) === 960).progress.classification, 'watching');
 });

@@ -13,6 +13,8 @@ const { EPISODE_KEY, markEpisodes, mergeImportedActions, toMs } = require('./epi
 
 const router = express.Router();
 const classificationRefreshes = new Map();
+// The one extra run queued behind a running refresh (see refreshClassificationOnce).
+const classificationFollowUps = new Map();
 const classificationLifetimeMs = 24 * 60 * 60 * 1000;
 
 // A pull-to-refresh is an explicit request for fresh data, so it ignores the
@@ -815,10 +817,29 @@ function seriesKey(seriesId) {
 // the same series. Running them concurrently doubled the TMDB reads and let two
 // passes race on watchlist membership, each deciding whether the show was still
 // active from its own pre-update snapshot.
+//
+// A request that arrives while one is running gets one more run after it,
+// shared by every request in between. Joining the running one alone was not
+// enough: it read the progress before the write that asked, so tick the last
+// episode, untick it a second later, and the first run still decided "caught
+// up" and took the show off the watchlist, with a result that looked fresh
+// until the next day's sweep.
 function refreshClassificationOnce(uid, seriesId) {
   const key = `${uid}:${seriesId}`;
   const inFlight = classificationRefreshes.get(key);
-  if (inFlight) return inFlight;
+  if (inFlight) {
+    let followUp = classificationFollowUps.get(key);
+    if (!followUp) {
+      followUp = inFlight
+        .catch(() => {})
+        .then(() => {
+          classificationFollowUps.delete(key);
+          return refreshClassificationOnce(uid, seriesId);
+        });
+      classificationFollowUps.set(key, followUp);
+    }
+    return followUp;
+  }
 
   const refresh = refreshClassification(uid, seriesId)
     .finally(() => classificationRefreshes.delete(key));
