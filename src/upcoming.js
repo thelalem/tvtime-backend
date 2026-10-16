@@ -13,6 +13,12 @@ const {
 const cacheLifetimeMs = 6 * 60 * 60 * 1000;
 const cacheStaleLimitMs = 7 * 24 * 60 * 60 * 1000;
 const cacheMaxEntries = 2000;
+// A pull-to-refresh reloads a show from TMDB and TVMaze only when no pull did in
+// this long. Every pull used to reload every show in the library, skipping all
+// caches: a few in a row queued TVMaze (18 calls per 10 s) for minutes, and
+// other users' lists and the notification sweep missed their deadlines. The
+// cache is shared, so anyone's pull counts.
+const forcedRefreshWindowMs = 5 * 60 * 1000;
 const upcomingCache = new Map();
 
 // Shows resolved at once. Almost every one of them is now answered from cache
@@ -113,8 +119,9 @@ function mapWithConcurrency(items, limit, run) {
 /// awaited. A pull-to-refresh always waits, since the point of it is new data.
 function cachedUpcoming(key, load, forceRefresh) {
   if (forceRefresh) {
-    upcomingCache.delete(key);
-    return beginUpcomingLoad(key, load);
+    // The entry is kept, not deleted: if this load fails, the list it was meant
+    // to replace is still better than none.
+    return beginUpcomingLoad(key, load, { forced: true });
   }
 
   const cached = upcomingCache.get(key);
@@ -132,11 +139,18 @@ function cachedUpcoming(key, load, forceRefresh) {
   return Promise.resolve(cached.value);
 }
 
-function beginUpcomingLoad(key, load) {
+/// `forced`: a pull-to-refresh, which bypasses the provider caches; when it
+/// lands, `freshAt` marks the entry as fresh from TMDB and TVMaze.
+function beginUpcomingLoad(key, load, { forced = false } = {}) {
   const previous = upcomingCache.get(key);
   const pending = load()
     .then((value) => {
-      upcomingCache.set(key, { value, storedAt: Date.now() });
+      const now = Date.now();
+      upcomingCache.set(key, {
+        value,
+        storedAt: now,
+        freshAt: forced ? now : previous?.freshAt,
+      });
       pruneUpcomingCache();
       return value;
     })
@@ -144,10 +158,16 @@ function beginUpcomingLoad(key, load) {
       // A stale value outlives the failed refresh that was meant to replace
       // it: still better than an empty list, and the next request retries.
       if (previous?.storedAt == null) upcomingCache.delete(key);
-      else upcomingCache.set(key, { value: previous.value, storedAt: previous.storedAt });
+      else {
+        upcomingCache.set(key, {
+          value: previous.value,
+          storedAt: previous.storedAt,
+          freshAt: previous.freshAt,
+        });
+      }
       throw error;
     });
-  upcomingCache.set(key, { ...previous, pending });
+  upcomingCache.set(key, { ...previous, pending, pendingForced: forced });
   return pending;
 }
 
@@ -395,12 +415,17 @@ async function getUpcomingEpisodes({ uid, today, forceRefresh = false, pool }) {
 
   const results = await mapWithConcurrency([...shows.values()], showConcurrency, async (show) => {
     try {
-      const episodes = await cachedUpcoming(
-        `${show.id}`,
-        () => loadSeriesEpisodes(show, forceRefresh),
-        forceRefresh,
-      );
-      return await buildSeriesUpcoming(show, episodes, today, forceRefresh);
+      const key = `${show.id}`;
+      const entry = upcomingCache.get(key);
+      // A pull while another pull's load of this show runs waits for that one;
+      // one within the window is a normal read (forcedRefreshWindowMs).
+      const joining = forceRefresh && entry?.pending != null && entry.pendingForced === true;
+      const fresh = entry?.freshAt != null && Date.now() - entry.freshAt < forcedRefreshWindowMs;
+      const force = forceRefresh && !joining && !fresh;
+      const episodes = joining
+        ? await entry.pending
+        : await cachedUpcoming(key, () => loadSeriesEpisodes(show, force), force);
+      return await buildSeriesUpcoming(show, episodes, today, force);
     } catch (error) {
       console.error(`[upcoming] ${show.id}: ${error.message}`);
       return [];
