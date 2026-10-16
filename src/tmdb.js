@@ -552,6 +552,25 @@ function getImdbId(showId, kind = 'tv') {
   );
 }
 
+// The TMDB id for an id from another site (TV Time exports TVDB ids for shows and IMDb ids for movies),
+// or null when TMDB does not know it. Cached in PostgreSQL, so a rerun or another user costs nothing;
+// a null only lasts a day (TMDB may learn the id later). `kind` is 'tv' (a TVDB id) or 'movie' (an IMDb id).
+function findTmdbId(kind, externalId) {
+  const isMovie = kind === 'movie';
+  return readThrough(
+    `find:${isMovie ? 'imdb-movie' : 'tvdb-tv'}:${externalId}`,
+    imdbIdCacheTtlMs,
+    async () => {
+      const found = await tmdbGet(`/find/${encodeURIComponent(externalId)}`, {
+        external_source: isMovie ? 'imdb_id' : 'tvdb_id',
+      });
+      const results = (found && (isMovie ? found.movie_results : found.tv_results)) || [];
+      return (results[0] && results[0].id) || null;
+    },
+    { emptyTtlMs: emptyAnswerTtlMs },
+  );
+}
+
 async function getShowImdbRating(showId, knownImdbId, kind = 'tv', { forList = false } = {}) {
   if (!config.omdbApiKey) return null;
   // A TMDB movie id and a show id are different things that can be the same number, so the
@@ -739,6 +758,7 @@ module.exports = {
   getDiscovery,
   getImdbId,
   getImdbRatings,
+  findTmdbId,
   getCollection,
   getMovie,
   getMovieRecommendations,
