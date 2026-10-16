@@ -127,9 +127,10 @@ test('settings: on by default, master switch and per-show mute round-trip', asyn
   assert.deepEqual((await api(uid, 'GET', '/me/notification-settings')).body, { enabled: true, mutedShows: [], muted: [] });
   assert.equal((await api(uid, 'PATCH', '/me/notification-settings', { enabled: 'no' })).status, 400);
   await api(uid, 'PATCH', '/me/notification-settings', { enabled: false });
-  await api(uid, 'PUT', '/me/notification-settings/muted/7', { name: 'Seven', posterPath: '/7.jpg' });
-  await api(uid, 'PUT', '/me/notification-settings/muted/7'); // muting again keeps the name
-  await api(uid, 'PUT', '/me/notification-settings/muted/3');
+  // Statuses checked, so a failed write shows as itself rather than as a missing row.
+  assert.equal((await api(uid, 'PUT', '/me/notification-settings/muted/7', { name: 'Seven', posterPath: '/7.jpg' })).status, 200);
+  assert.equal((await api(uid, 'PUT', '/me/notification-settings/muted/7')).status, 200); // muting again keeps the name
+  assert.equal((await api(uid, 'PUT', '/me/notification-settings/muted/3')).status, 200);
   assert.deepEqual((await api(uid, 'GET', '/me/notification-settings')).body, {
     enabled: false,
     mutedShows: [3, 7],
