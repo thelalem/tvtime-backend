@@ -10,7 +10,7 @@ const stub = {
     if (id === '5') throw new Error('TMDB down');
     return id === '10736237' ? { show: 281666, season: 1, episode: 1 } : null;
   },
-  findMovieByTitle: async (title, year) => {
+  findMovieByTitle: async (title, { year } = {}) => {
     lookups.push(`title:${title}:${year}`);
     return title === 'My Oxford Year' ? 1307078 : null;
   },
@@ -84,8 +84,14 @@ test('movies the id lookup cannot find are matched by title and year', async () 
   assert.deepEqual(payload.search, { tt32641187: 1307078, tt1: null });
 });
 
+test('a search item may carry no year, and a watched day instead', async () => {
+  const { status, payload } = await call({ search: [{ key: 'u1', title: 'My Oxford Year', before: '2025-08-20' }] });
+  assert.equal(status, 200);
+  assert.deepEqual(payload.search, { u1: 1307078 });
+});
+
 test('bad search items are refused', async () => {
-  for (const search of [{}, [{ key: 'a', title: '', year: 2000 }], [{ key: 'a', title: 'x', year: 'y' }],
+  for (const search of [{}, [{ key: 'a', title: '', year: 2000 }], [{ key: 'a', title: 'x', year: 'y' }], [{ key: 'a', title: 'x', before: 'soon' }],
     Array.from({ length: 51 }, (_, i) => ({ key: `k${i}`, title: 't', year: 2000 }))]) {
     assert.equal((await call({ search })).status, 400);
   }

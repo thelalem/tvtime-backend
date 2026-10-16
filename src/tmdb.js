@@ -590,28 +590,51 @@ function findEpisodeByTvdbId(episodeId) {
 }
 
 function plainTitle(text) {
-  return String(text || '').toLowerCase().normalize('NFKD').replace(/[^a-z0-9]+/g, '');
+  return String(text || '').toLowerCase().normalize('NFKD').replace(/\p{M}/gu, '').replace(/[^\p{L}\p{N}]+/gu, '');
 }
 
-// The TMDB movie with exactly this title (ignoring case and punctuation) released in `year` (or a year
-// either side, for premieres that differ between countries), or null. For a movie the id lookup cannot
-// find: TV Time sometimes holds an IMDb id TMDB does not list for the film. A guess is worse than
-// nothing, so a title that only looks alike is not accepted. Cached in PostgreSQL.
-function findMovieByTitle(title, year) {
+// Which search result is the movie the title names. Exact title only (case, accents and punctuation aside),
+// against the title or the original title, so a title in another language matches too.
+// - With a release year: released in that year or a year either side (premieres differ between countries).
+// - Without one: when `before` (the day the user watched it) is given, released by then; if that still
+//   leaves several movies of that name, the best-known one counts only when it clearly dominates (three
+//   times the votes of the next); otherwise it is ambiguous and nothing is chosen.
+// A guess is worse than nothing, so a title that only looks alike is never accepted.
+function pickMovieByTitle(results, title, { year = null, before = null } = {}) {
   const wanted = plainTitle(title);
-  const wantedYear = Number(year);
-  if (!wanted || !Number.isInteger(wantedYear)) return Promise.resolve(null);
+  if (!wanted) return null;
+  const released = (movie) => Number.parseInt(String(movie.release_date || '').slice(0, 4), 10);
+  let candidates = (results || []).filter((movie) =>
+    [movie.title, movie.original_title].some((name) => plainTitle(name) === wanted));
+  if (Number.isInteger(year)) {
+    candidates = candidates.filter((movie) => Number.isInteger(released(movie)) && Math.abs(released(movie) - year) <= 1);
+    return candidates.length ? candidates[0].id : null;
+  }
+  if (before) {
+    candidates = candidates.filter((movie) => movie.release_date && String(movie.release_date) <= before);
+  }
+  if (candidates.length <= 1) return candidates.length ? candidates[0].id : null;
+  const byVotes = [...candidates].sort((a, b) => (b.vote_count || 0) - (a.vote_count || 0));
+  const [top, next] = byVotes;
+  return (top.vote_count || 0) >= 20 && (top.vote_count || 0) >= 3 * (next.vote_count || 0) ? top.id : null;
+}
+
+// The TMDB movie for a title the id lookup cannot find (TV Time's data carries no IMDb or TMDB id for
+// movies, and sometimes no release year). See pickMovieByTitle for what is accepted. Cached in PostgreSQL.
+function findMovieByTitle(title, { year = null, before = null } = {}) {
+  const wanted = plainTitle(title);
+  const wantedYear = Number.isInteger(year) ? year : null;
+  const day = typeof before === 'string' && /^\d{4}-\d{2}-\d{2}/.test(before) ? before.slice(0, 10) : null;
+  if (!wanted) return Promise.resolve(null);
   return readThrough(
-    `find:title-movie:${wanted}:${wantedYear}`,
+    `find:title-movie:${wanted}:${wantedYear ?? 'any'}:${wantedYear === null && day ? day.slice(0, 7) : ''}`,
     imdbIdCacheTtlMs,
     async () => {
-      const found = await tmdbGet('/search/movie', { query: String(title).slice(0, 200), year: wantedYear });
-      const match = ((found && found.results) || []).find((movie) => {
-        const released = Number.parseInt(String(movie.release_date || '').slice(0, 4), 10);
-        return [movie.title, movie.original_title].some((name) => plainTitle(name) === wanted) &&
-          Number.isInteger(released) && Math.abs(released - wantedYear) <= 1;
+      const found = await tmdbGet('/search/movie', {
+        query: String(title).slice(0, 200),
+        year: wantedYear === null ? undefined : wantedYear,
       });
-      return match ? match.id : null;
+      return pickMovieByTitle(found && found.results, title, { year: wantedYear, before: day });
     },
     { emptyTtlMs: emptyAnswerTtlMs },
   );
@@ -806,6 +829,7 @@ module.exports = {
   getImdbRatings,
   findTmdbId,
   findMovieByTitle,
+  pickMovieByTitle,
   findEpisodeByTvdbId,
   getCollection,
   getMovie,

@@ -44,7 +44,7 @@ undici.fetch = async (url) => {
     }),
   };
 };
-const { findEpisodeByTvdbId, findMovieByTitle, findTmdbId } = require('../src/tmdb');
+const { findEpisodeByTvdbId, findMovieByTitle, findTmdbId, pickMovieByTitle } = require('../src/tmdb');
 
 test('finds a show by TVDB id and a movie by IMDb id, asking TMDB once each', async () => {
   assert.equal(await findTmdbId('tv', '81189'), 1396);
@@ -61,14 +61,35 @@ test('an id TMDB does not know is null, and remembered', async () => {
 });
 
 test('a movie is found by exact title and release year, never by a lookalike', async () => {
-  assert.equal(await findMovieByTitle('my oxford year!', 2025), 1307078);
-  assert.equal(await findMovieByTitle('My Oxford Year', 2024), 1307078, 'a year either side is allowed');
-  assert.equal(await findMovieByTitle('My Oxford Year', 2010), null);
-  assert.equal(await findMovieByTitle('Oxford', 2025), null);
-  assert.equal(await findMovieByTitle('', 2025), null);
+  assert.equal(await findMovieByTitle('my oxford year!', { year: 2025 }), 1307078);
+  assert.equal(await findMovieByTitle('My Oxford Year', { year: 2024 }), 1307078, 'a year either side is allowed');
+  assert.equal(await findMovieByTitle('My Oxford Year', { year: 2010 }), null);
+  assert.equal(await findMovieByTitle('Oxford', { year: 2025 }), null);
+  assert.equal(await findMovieByTitle('', { year: 2025 }), null);
 });
 
 test('an episode is placed by its TVDB id, and an unknown one is null', async () => {
   assert.deepEqual(await findEpisodeByTvdbId('10736237'), { show: 281666, season: 1, episode: 3 });
   assert.equal(await findEpisodeByTvdbId('4'), null);
+});
+
+const movie = (id, title, date, votes, original) => ({ id, title, original_title: original || title, release_date: date, vote_count: votes });
+
+test('without a year: one exact title wins; several only when one clearly dominates; none when unclear', () => {
+  const titanic = [movie(1, 'Titanic', '1997-11-18', 25000), movie(2, 'Titanic', '1953-04-11', 300), movie(3, 'Titanic II', '2010-01-01', 900)];
+  assert.equal(pickMovieByTitle(titanic, 'Titanic'), 1, 'the best-known dominates the other exact title');
+  const angels = [movie(10, "Charlie's Angels", '2000-11-02', 4600), movie(11, "Charlie's Angels", '2019-11-14', 2900)];
+  assert.equal(pickMovieByTitle(angels, "Charlie's Angels"), null, 'too close: ambiguous');
+  assert.equal(pickMovieByTitle(angels, "Charlie's Angels", { before: '2019-12-01' }), null, 'both were out by then');
+  assert.equal(pickMovieByTitle(angels, "Charlie's Angels", { before: '2005-01-01' }), 10, 'only one was out by the day it was watched');
+  assert.equal(pickMovieByTitle([movie(20, 'Avengers: Endgame', '2019-04-24', 25000)], 'Avengers Endgame'), 20);
+  assert.equal(pickMovieByTitle([movie(30, 'Something Else', '2019-01-01', 5)], 'Avengers: Endgame'), null);
+  assert.equal(pickMovieByTitle([], 'Titanic'), null);
+});
+
+test('titles in another language match the original title; accents and punctuation do not matter', () => {
+  const wandering = [movie(40, 'The Wandering Earth', '2019-02-05', 3000, '流浪地球')];
+  assert.equal(pickMovieByTitle(wandering, '流浪地球'), 40);
+  assert.equal(pickMovieByTitle([movie(41, 'Amélie', '2001-04-25', 9000)], 'Amelie', { year: 2001 }), 41);
+  assert.equal(pickMovieByTitle([movie(42, "F*ck Valentine's Day", '2019-02-14', 40)], 'F*ck Valentines Day'), 42);
 });

@@ -5,12 +5,12 @@ const { findEpisodeByTvdbId, findMovieByTitle, findTmdbId } = require('./tmdb');
 // with every answer cached in PostgreSQL (see findTmdbId), so a rerun costs no TMDB calls.
 //
 //   POST /me/import/resolve  { tvdb: [81189, ...], imdb: ["tt0163025", ...],
-//                              search: [{ key: "tt32641187", title: "My Oxford Year", year: 2025 }],
+//                              search: [{ key: "uuid", title: "My Oxford Year", year: 2025, before: "2025-08-20" }],
 //                              episodes: [10736237, ...] }
 //   -> { tvdb: { "81189": 1396, "5": null }, imdb: { "tt0163025": 331 }, search: { "tt32641187": 1307078 },
 //        episodes: { "10736237": { show: 281666, season: 1, episode: 1 }, "7": null }, failed: ["tvdb:77"] }
 // `episodes` are TVDB episode ids, answered with where TMDB has the episode (its show, season and number),
-// which is exact even when the numbering differs. `search` is for movies whose IMDb id TMDB does not know: matched by exact title and release year.
+// which is exact even when the numbering differs. `search` is for movies whose IMDb id TMDB does not know: matched by exact title and release year (or, with no year, by title alone when that is unambiguous).
 //
 // `null` means TMDB does not know the id (final for now). An id the lookup failed on (TMDB down) is left
 // out of the maps and named in `failed`, so the app asks again for just those.
@@ -39,8 +39,11 @@ function cleanSearch(value) {
   for (const item of value) {
     if (!item || typeof item !== 'object' || typeof item.key !== 'string' || !item.key || item.key.length > 40 ||
         typeof item.title !== 'string' || !item.title.trim() || item.title.length > 200 ||
-        !Number.isInteger(item.year) || item.year < 1880 || item.year > 2100) return null;
-    items.push({ key: item.key, title: item.title, year: item.year });
+        !(item.year === undefined || item.year === null ||
+          (Number.isInteger(item.year) && item.year >= 1880 && item.year <= 2100)) ||
+        !(item.before === undefined || item.before === null ||
+          (typeof item.before === 'string' && /^\d{4}-\d{2}-\d{2}/.test(item.before)))) return null;
+    items.push({ key: item.key, title: item.title, year: item.year ?? null, before: item.before ?? null });
   }
   return items;
 }
@@ -52,7 +55,7 @@ async function resolveAll(jobs) {
       const job = queue.shift();
       try {
         job.result = job.search
-          ? await findMovieByTitle(job.search.title, job.search.year)
+          ? await findMovieByTitle(job.search.title, { year: job.search.year, before: job.search.before })
           : job.kind === 'episode'
             ? await findEpisodeByTvdbId(job.id)
             : await findTmdbId(job.kind, job.id);
