@@ -571,6 +571,24 @@ function findTmdbId(kind, externalId) {
   );
 }
 
+// Where TMDB puts an episode that TV Time knows by its TVDB episode id: `{ show, season, episode }`, or null.
+// The one exact way to match an episode when the two sites number a season differently (a two-part episode
+// that TMDB counts as one, a special, a season TMDB files under another show). Cached in PostgreSQL.
+function findEpisodeByTvdbId(episodeId) {
+  return readThrough(
+    `find:tvdb-episode:${episodeId}`,
+    imdbIdCacheTtlMs,
+    async () => {
+      const found = await tmdbGet(`/find/${encodeURIComponent(episodeId)}`, { external_source: 'tvdb_id' });
+      const hit = found && found.tv_episode_results && found.tv_episode_results[0];
+      if (!hit || !Number.isInteger(hit.show_id) || !Number.isInteger(hit.season_number) ||
+          !Number.isInteger(hit.episode_number)) return null;
+      return { show: hit.show_id, season: hit.season_number, episode: hit.episode_number };
+    },
+    { emptyTtlMs: emptyAnswerTtlMs },
+  );
+}
+
 function plainTitle(text) {
   return String(text || '').toLowerCase().normalize('NFKD').replace(/[^a-z0-9]+/g, '');
 }
@@ -788,6 +806,7 @@ module.exports = {
   getImdbRatings,
   findTmdbId,
   findMovieByTitle,
+  findEpisodeByTvdbId,
   getCollection,
   getMovie,
   getMovieRecommendations,

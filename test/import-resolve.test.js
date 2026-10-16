@@ -5,6 +5,11 @@ const Module = require('node:module');
 const lookups = [];
 let failFor = null;
 const stub = {
+  findEpisodeByTvdbId: async (id) => {
+    lookups.push(`episode:${id}`);
+    if (id === '5') throw new Error('TMDB down');
+    return id === '10736237' ? { show: 281666, season: 1, episode: 1 } : null;
+  },
   findMovieByTitle: async (title, year) => {
     lookups.push(`title:${title}:${year}`);
     return title === 'My Oxford Year' ? 1307078 : null;
@@ -86,7 +91,15 @@ test('bad search items are refused', async () => {
   }
 });
 
+test('episodes are placed by TVDB episode id: show, season and number, or null', async () => {
+  const { payload } = await call({ episodes: [10736237, 99, 5] });
+  assert.deepEqual(payload.episodes, { 10736237: { show: 281666, season: 1, episode: 1 }, 99: null });
+  assert.deepEqual(payload.failed, ['episodes:5']);
+  assert.equal((await call({ episodes: Array.from({ length: 201 }, (_, i) => i + 1) })).status, 400);
+  assert.equal((await call({ episodes: ['x'] })).status, 400);
+});
+
 test('an empty request answers empty maps', async () => {
   const { payload } = await call({});
-  assert.deepEqual(payload, { tvdb: {}, imdb: {}, search: {}, failed: [] });
+  assert.deepEqual(payload, { tvdb: {}, imdb: {}, search: {}, episodes: {}, failed: [] });
 });
