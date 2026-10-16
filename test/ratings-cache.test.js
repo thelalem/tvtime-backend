@@ -3,10 +3,18 @@ const assert = require('node:assert/strict');
 const path = require('node:path');
 
 // A stand-in for PostgreSQL that understands the two statements
-// persistent-cache.js sends, so the cache can be tested without a database.
+// persistent-cache.js sends and the OMDb call count (omdb-budget.js), so the
+// cache can be tested without a database.
 const rows = new Map();
+let omdbCallsToday = 0;
 const fakePool = {
   async query(sql, params) {
+    if (/omdb_usage/.test(sql)) {
+      const [, limit] = params;
+      if (omdbCallsToday >= limit) return { rows: [] };
+      omdbCallsToday += 1;
+      return { rows: [{ calls: omdbCallsToday }] };
+    }
     if (/^\s*SELECT/i.test(sql)) {
       const [key, ttlMs] = params;
       const row = rows.get(key);
@@ -29,7 +37,7 @@ require.cache[dbPath] = { id: dbPath, filename: dbPath, loaded: true, exports: {
 // A fresh copy of tmdb.js, as after a restart: empty in-memory caches, same
 // database.
 function freshTmdb() {
-  for (const name of ['tmdb.js', 'persistent-cache.js']) {
+  for (const name of ['tmdb.js', 'persistent-cache.js', 'omdb-budget.js', 'config.js']) {
     delete require.cache[path.join(__dirname, '..', 'src', name)];
   }
   return require('../src/tmdb');
@@ -75,6 +83,7 @@ undici.fetch = stubFetch;
 
 test.beforeEach(() => {
   rows.clear();
+  omdbCallsToday = 0;
   calls.tmdb = 0;
   calls.omdb = 0;
   omdbMode = 'ok';
@@ -142,6 +151,62 @@ test('a show IMDb rates is remembered for its list rating too', async () => {
     assert.equal(second.results[0].vote_average, 8.7);
     assert.deepEqual(calls, { tmdb: 1, omdb: 1 }, 'the restart cost no provider calls');
   } finally {
+    undici.fetch = stubFetch;
+  }
+});
+
+test("lists spend only their share of the day's OMDb calls; show pages keep the rest", async () => {
+  const json = (body) => ({
+    ok: true,
+    status: 200,
+    headers: { get: () => null },
+    json: async () => body,
+  });
+  undici.fetch = async (url) => {
+    const href = String(url);
+    const external = href.match(/\/tv\/(\d+)\/external_ids/);
+    if (external) return json({ imdb_id: `tt${external[1]}` });
+    if (href.startsWith('https://tmdb.test')) {
+      const id = Number(href.match(/\/tv\/(\d+)/)[1]);
+      return json({
+        id,
+        status: 'Ended',
+        external_ids: { imdb_id: `tt${id}` },
+        seasons: [{ season_number: 1 }, { season_number: 2 }],
+      });
+    }
+    calls.omdb += 1;
+    const season = new URL(href).searchParams.get('Season');
+    return season
+      ? json({ Response: 'True', Episodes: [{ Episode: '1', imdbRating: '9.0' }] })
+      : json({ Response: 'True', imdbRating: '8.7' });
+  };
+  process.env.OMDB_DAILY_BUDGET = '4';
+  process.env.OMDB_LIST_BUDGET = '2';
+  try {
+    const tmdb = freshTmdb();
+    const list = { results: [1, 2, 3].map((id) => ({ id, vote_average: 5 })) };
+    const rated = await tmdb.withImdbRatings(list);
+    assert.equal(calls.omdb, 2, 'the list stopped at its share');
+    assert.deepEqual(
+      rated.results.map((show) => show.vote_average).sort(),
+      [5, 8.7, 8.7],
+      'the show over the share keeps its TMDB rating',
+    );
+
+    const episodes = await tmdb.getImdbRatings(1);
+    assert.deepEqual(episodes.ratings, { '1_1': 9, '2_1': 9 }, 'a show page still gets IMDb');
+    assert.equal(calls.omdb, 4);
+
+    await assert.rejects(
+      tmdb.getImdbRatings(2),
+      (error) => error.status === 503,
+      "past the whole day's budget the ratings route answers 503",
+    );
+    assert.equal(calls.omdb, 4, 'and OMDb is not asked');
+  } finally {
+    delete process.env.OMDB_DAILY_BUDGET;
+    delete process.env.OMDB_LIST_BUDGET;
     undici.fetch = stubFetch;
   }
 });

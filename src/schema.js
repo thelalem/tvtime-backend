@@ -176,6 +176,12 @@ async function initializeDatabase() {
       data JSONB NOT NULL,
       fetched_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
+
+    -- OMDb calls made each UTC day (see omdb-budget.js).
+    CREATE TABLE IF NOT EXISTS omdb_usage (
+      day DATE PRIMARY KEY,
+      calls INTEGER NOT NULL
+    );
   `);
 }
 

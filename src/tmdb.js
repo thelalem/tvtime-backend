@@ -1,6 +1,7 @@
 const { Agent, fetch } = require('undici');
 const { config } = require('./config');
 const { readThrough } = require('./persistent-cache');
+const { takeOmdbCall } = require('./omdb-budget');
 
 // TMDB rate-limits per IP, and a classification pass reads one show plus every
 // one of its seasons. Uncapped, a single pull-to-refresh fired hundreds of
@@ -397,8 +398,17 @@ function omdbQuotaError() {
   return error;
 }
 
-async function omdbGet(url) {
+// `forList`: a rating for a list of shows, which may spend only the lists'
+// share of the day's calls (omdb-budget.js); a show page or its episode ratings
+// may spend the whole day's.
+async function omdbGet(url, { forList = false } = {}) {
   if (Date.now() < omdbBlockedUntil) throw omdbQuotaError();
+  const limit = forList ? config.omdbListBudget : config.omdbDailyBudget;
+  if (!await takeOmdbCall(limit)) {
+    const error = providerError('OMDb daily budget used', 503);
+    error.omdbQuota = true;
+    throw error;
+  }
   let data;
   try {
     data = await requestJson(url, {}, 'OMDb is unavailable');
@@ -445,7 +455,7 @@ async function fetchOmdbSeasonRatings(imdbId, seasonNumber) {
 // and a "no rating" answer is cached too so unrated shows are not re-asked.
 // Failures are not cached: OMDb being down or over quota just means the caller
 // falls back to the TMDB rating for now.
-async function getShowImdbRating(showId, knownImdbId, kind = 'tv') {
+async function getShowImdbRating(showId, knownImdbId, kind = 'tv', { forList = false } = {}) {
   if (!config.omdbApiKey) return null;
   // A TMDB movie id and a show id are different things that can be the same number, so the
   // cache keys say which. The show keys keep their original spelling.
@@ -466,7 +476,7 @@ async function getShowImdbRating(showId, knownImdbId, kind = 'tv') {
         const url = new URL(config.omdbBaseUrl);
         url.searchParams.set('apikey', config.omdbApiKey);
         url.searchParams.set('i', imdbId);
-        const data = await omdbGet(url);
+        const data = await omdbGet(url, { forList });
         const rating = Number.parseFloat(data && data.imdbRating);
         return data && data.Response !== 'False' && Number.isFinite(rating) && rating > 0
           ? rating
@@ -483,8 +493,8 @@ async function getShowImdbRating(showId, knownImdbId, kind = 'tv') {
 // whole page of 20 shows for up to the provider's 15 s timeout.
 const imdbRatingWaitMs = 2000;
 
-function imdbRatingWithin(showId, knownImdbId, kind = 'tv') {
-  const lookup = getShowImdbRating(showId, knownImdbId, kind).catch(() => null);
+function imdbRatingWithin(showId, knownImdbId, kind = 'tv', options = {}) {
+  const lookup = getShowImdbRating(showId, knownImdbId, kind, options).catch(() => null);
   return Promise.race([
     lookup,
     delay(imdbRatingWaitMs).then(() => null),
@@ -502,7 +512,7 @@ async function withImdbRatings(list, defaultKind = 'tv') {
     const kind = show.media_type === 'movie' || show.media_type === 'tv'
       ? show.media_type
       : defaultKind;
-    const rating = await imdbRatingWithin(show.id, undefined, kind);
+    const rating = await imdbRatingWithin(show.id, undefined, kind, { forList: true });
     return rating == null
       ? show
       : { ...show, tmdb_vote_average: show.vote_average, vote_average: rating };

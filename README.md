@@ -15,6 +15,8 @@ PostgreSQL user row.
    `GOOGLE_APPLICATION_CREDENTIALS` pointing to a service account JSON file or
    `FIREBASE_SERVICE_ACCOUNT_BASE64` containing that JSON encoded as base64.
    Set `OMDB_API_KEY` to enable IMDb episode ratings.
+   OMDb calls are counted per UTC day: at most `OMDB_DAILY_BUDGET` (default 900), of which lists
+   may use `OMDB_LIST_BUDGET` (default 60%); past that, lists keep TMDB's rating and `/ratings` answers 503.
 3. Start PostgreSQL with `docker compose up -d db`.
 4. Install dependencies and start the API:
 

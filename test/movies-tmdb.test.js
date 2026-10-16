@@ -7,6 +7,8 @@ const path = require('node:path');
 const rows = new Map();
 const fakePool = {
   async query(sql, params) {
+    // The OMDb call count (omdb-budget.js): always within budget here.
+    if (/omdb_usage/.test(sql)) return { rows: [{ calls: 1 }] };
     if (/^\s*SELECT/i.test(sql)) {
       const [key, ttlMs] = params;
       const row = rows.get(key);
