@@ -10,6 +10,7 @@
 // started has no progress row, and the state has to outlive the watchlist row it replaces.
 const { pool } = require('./db');
 const { invalidateRecommendations } = require('./recommendations');
+const { sendJsonWithEtag } = require('./etag');
 
 const STATES = new Set(['stopped', 'removed']);
 
@@ -54,7 +55,7 @@ function registerShowStateRoutes(router) {
   router.get('/me/show-states', async (request, response, next) => {
     try {
       const { stopped, removed } = await loadShowStates(pool, request.user.uid);
-      response.json({ stopped: [...stopped.keys()], removed: [...removed] });
+      sendJsonWithEtag(request, response, { stopped: [...stopped.keys()], removed: [...removed] });
     } catch (error) { next(error); }
   });
 

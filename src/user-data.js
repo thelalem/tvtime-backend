@@ -10,6 +10,7 @@ const { registerNotificationRoutes } = require('./notifications');
 const { clearShowState, loadShowStates, registerShowStateRoutes } = require('./show-states');
 const { hasAired, isValidTimeZone, localDateString } = require('./local-date');
 const { EPISODE_KEY, markEpisodes, mergeImportedActions, toMs } = require('./episode-merge');
+const { sendJsonWithEtag } = require('./etag');
 
 const router = express.Router();
 const classificationRefreshes = new Map();
@@ -161,7 +162,7 @@ router.get('/me/progress', async (request, response, next) => {
        FROM show_progress WHERE firebase_uid=$1 ORDER BY updated_at DESC`,
       [request.user.uid],
     );
-    response.json(rows);
+    sendJsonWithEtag(request, response, rows);
   } catch (error) { next(error); }
 });
 
@@ -369,7 +370,11 @@ router.get('/me/:collection', async (request, response, next) => {
       `SELECT series AS data, added_at AS "addedAt" FROM ${table}
        WHERE firebase_uid = $1 ORDER BY added_at DESC`, [request.user.uid],
     );
-    response.json(rows.map((row) => ({ ...row.data, addedAt: row.addedAt })));
+    sendJsonWithEtag(
+      request,
+      response,
+      rows.map((row) => ({ ...row.data, addedAt: row.addedAt })),
+    );
   } catch (error) { next(error); }
 });
 

@@ -244,3 +244,26 @@ test('a change made while a refresh is running gets the last word', async () => 
   assert.deepEqual(watchlistIds(body), [960], 'still on the watchlist: not caught up');
   assert.equal(body.allShows.find((e) => Number(e.show.id) === 960).progress.classification, 'watching');
 });
+
+test('a poll the client already has is answered 304 with no body; a change is sent in full', async () => {
+  const uid = newUser();
+  await add(uid, 80, 'Eighty');
+  const get = (route, tag) => fetch(`${base}/api/v1${route}`, {
+    headers: { authorization: `Bearer ${uid}`, ...(tag ? { 'if-none-match': tag } : {}) },
+  });
+  for (const route of ['/me/watchlist', '/me/progress', '/me/show-states']) {
+    const first = await get(route);
+    const tag = first.headers.get('etag');
+    assert.equal(first.status, 200, route);
+    assert.ok(tag, route);
+    const again = await get(route, tag);
+    assert.equal(again.status, 304, route);
+    assert.equal(await again.text(), '', route);
+    assert.equal((await get(route, `W/${tag}`)).status, 304, `${route}: the weak form Cloudflare sends`);
+  }
+  const before = (await get('/me/watchlist')).headers.get('etag');
+  await add(uid, 81, 'Eighty-one');
+  const changed = await get('/me/watchlist', before);
+  assert.equal(changed.status, 200);
+  assert.equal((await changed.json()).length, 2);
+});
