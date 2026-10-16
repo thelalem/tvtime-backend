@@ -123,13 +123,17 @@ test('device tokens: validated, upserted, moved to the new user, deleted on sign
 
 test('settings: on by default, master switch and per-show mute round-trip', async () => {
   const uid = newUser();
-  assert.deepEqual((await api(uid, 'GET', '/me/notification-settings')).body, { enabled: true, mutedShows: [] });
+  assert.deepEqual((await api(uid, 'GET', '/me/notification-settings')).body, { enabled: true, mutedShows: [], muted: [] });
   assert.equal((await api(uid, 'PATCH', '/me/notification-settings', { enabled: 'no' })).status, 400);
   await api(uid, 'PATCH', '/me/notification-settings', { enabled: false });
-  await api(uid, 'PUT', '/me/notification-settings/muted/7');
-  await api(uid, 'PUT', '/me/notification-settings/muted/7');
+  await api(uid, 'PUT', '/me/notification-settings/muted/7', { name: 'Seven', posterPath: '/7.jpg' });
+  await api(uid, 'PUT', '/me/notification-settings/muted/7'); // muting again keeps the name
   await api(uid, 'PUT', '/me/notification-settings/muted/3');
-  assert.deepEqual((await api(uid, 'GET', '/me/notification-settings')).body, { enabled: false, mutedShows: [3, 7] });
+  assert.deepEqual((await api(uid, 'GET', '/me/notification-settings')).body, {
+    enabled: false,
+    mutedShows: [3, 7],
+    muted: [{ id: 3, name: null, posterPath: null }, { id: 7, name: 'Seven', posterPath: '/7.jpg' }],
+  });
   await api(uid, 'DELETE', '/me/notification-settings/muted/3');
   assert.deepEqual((await api(uid, 'GET', '/me/notification-settings')).body.mutedShows, [7]);
 });

@@ -210,11 +210,19 @@ function registerNotificationRoutes(router) {
       const uid = request.user.uid;
       const [user, muted] = await Promise.all([
         pool.query('SELECT notifications_enabled AS enabled FROM app_users WHERE firebase_uid=$1', [uid]),
-        pool.query('SELECT series_id FROM muted_shows WHERE firebase_uid=$1 ORDER BY series_id', [uid]),
+        pool.query(
+          'SELECT series_id, name, poster_path FROM muted_shows WHERE firebase_uid=$1 ORDER BY series_id',
+          [uid],
+        ),
       ]);
       response.json({
         enabled: user.rows[0]?.enabled ?? true,
         mutedShows: muted.rows.map((row) => Number(row.series_id)),
+        muted: muted.rows.map((row) => ({
+          id: Number(row.series_id),
+          name: row.name || null,
+          posterPath: row.poster_path || null,
+        })),
       });
     } catch (error) { next(error); }
   });
@@ -233,9 +241,15 @@ function registerNotificationRoutes(router) {
     const seriesId = parseSeriesId(request.params.seriesId);
     if (!seriesId) return response.status(400).json({ error: 'invalid_series_id' });
     try {
+      // The body (optional) is the show, kept so the Muted shows list can draw it.
+      const name = typeof request.body?.name === 'string' ? request.body.name.slice(0, 200) : null;
+      const poster = typeof request.body?.posterPath === 'string' ? request.body.posterPath.slice(0, 200) : null;
       await pool.query(
-        'INSERT INTO muted_shows(firebase_uid, series_id) VALUES ($1,$2) ON CONFLICT DO NOTHING',
-        [request.user.uid, seriesId],
+        `INSERT INTO muted_shows(firebase_uid, series_id, name, poster_path) VALUES ($1,$2,$3,$4)
+         ON CONFLICT(firebase_uid, series_id) DO UPDATE
+         SET name=COALESCE(EXCLUDED.name, muted_shows.name),
+             poster_path=COALESCE(EXCLUDED.poster_path, muted_shows.poster_path)`,
+        [request.user.uid, seriesId, name, poster],
       );
       response.json({ muted: true });
     } catch (error) { next(error); }

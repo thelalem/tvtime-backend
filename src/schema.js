@@ -137,6 +137,10 @@ async function initializeDatabase() {
       series_id BIGINT NOT NULL,
       PRIMARY KEY (firebase_uid, series_id)
     );
+    -- The show as drawn when it was muted, so Settings can list it even after it is removed.
+    ALTER TABLE muted_shows
+      ADD COLUMN IF NOT EXISTS name TEXT,
+      ADD COLUMN IF NOT EXISTS poster_path TEXT;
 
     -- Which episode notifications went out, so a restart or a second sweep never repeats one.
     CREATE TABLE IF NOT EXISTS notifications_sent (
