@@ -537,6 +537,21 @@ async function fetchOmdbSeasonRatings(imdbId, seasonNumber) {
 // and a "no rating" answer is cached too so unrated shows are not re-asked.
 // Failures are not cached: OMDb being down or over quota just means the caller
 // falls back to the TMDB rating for now.
+// The IMDb id TMDB has for a show or movie, or null. Cached in PostgreSQL; a
+// null (often "not yet" for a new show) only for a day.
+function getImdbId(showId, kind = 'tv') {
+  const isMovie = kind === 'movie';
+  return readThrough(
+    isMovie ? `imdbid:movie:${showId}` : `imdbid:${showId}`,
+    imdbIdCacheTtlMs,
+    async () => {
+      const ids = await tmdbGet(`/${isMovie ? 'movie' : 'tv'}/${showId}/external_ids`);
+      return (ids && ids.imdb_id) || null;
+    },
+    { emptyTtlMs: emptyAnswerTtlMs },
+  );
+}
+
 async function getShowImdbRating(showId, knownImdbId, kind = 'tv', { forList = false } = {}) {
   if (!config.omdbApiKey) return null;
   // A TMDB movie id and a show id are different things that can be the same number, so the
@@ -545,15 +560,7 @@ async function getShowImdbRating(showId, knownImdbId, kind = 'tv', { forList = f
   return cachedProviderRead(
     isMovie ? `imdb-movie-rating:${showId}` : `imdb-show-rating:${showId}`,
     async () => {
-      const imdbId = knownImdbId || await readThrough(
-        isMovie ? `imdbid:movie:${showId}` : `imdbid:${showId}`,
-        imdbIdCacheTtlMs,
-        async () => {
-          const ids = await tmdbGet(`/${isMovie ? 'movie' : 'tv'}/${showId}/external_ids`);
-          return (ids && ids.imdb_id) || null;
-        },
-        { emptyTtlMs: emptyAnswerTtlMs },
-      );
+      const imdbId = knownImdbId || await getImdbId(showId, kind);
       if (!imdbId) return null;
       return readThrough(`omdb:show:${imdbId}`, imdbRatingCacheTtlMs, async () => {
         const url = new URL(config.omdbBaseUrl);
@@ -655,7 +662,32 @@ async function loadImdbRatings(showId) {
 ///
 /// Cached, which also makes the second lookup free: a show's airtime and its
 /// episode list are both wanted, and each used to run its own `/singlesearch`.
-async function getTvMazeShow(name, { forceRefresh = false } = {}) {
+//
+// With `imdbId`, the show is first looked up by it: by name alone, remakes and
+// shows sharing a name (The Office UK and US) took each other's air time,
+// network and episode text. The name is the fallback when TVMaze has no show
+// under that id.
+async function getTvMazeShow(name, { forceRefresh = false, imdbId = null } = {}) {
+  if (typeof imdbId === 'string' && /^tt\d+$/.test(imdbId)) {
+    const byId = await cachedProviderRead(
+      `tvmaze:show:imdb:${imdbId}`,
+      async () => {
+        const url = new URL(`${config.tvMazeBaseUrl.replace(/\/$/, '')}/lookup/shows`);
+        url.searchParams.set('imdb', imdbId);
+        try {
+          return await providerGet(url, {
+            limiter: withTvMazeSlot,
+            unavailableMessage: 'TVMaze is unavailable',
+          });
+        } catch (error) {
+          if (error.providerStatus === 404) return null;
+          throw error;
+        }
+      },
+      { forceRefresh, ttlMs: tvMazeShowCacheTtlMs },
+    );
+    if (byId) return byId;
+  }
   const query = typeof name === 'string' ? name.trim() : '';
   if (!query) return null;
   return cachedProviderRead(
@@ -680,8 +712,8 @@ async function getTvMazeShow(name, { forceRefresh = false } = {}) {
   );
 }
 
-async function getTvMazeEpisodes(name, { forceRefresh = false } = {}) {
-  const show = await getTvMazeShow(name, { forceRefresh });
+async function getTvMazeEpisodes(name, { forceRefresh = false, imdbId = null } = {}) {
+  const show = await getTvMazeShow(name, { forceRefresh, imdbId });
   if (!show || !show.id) return [];
   return cachedProviderRead(
     `tvmaze:episodes:${show.id}`,
@@ -705,6 +737,7 @@ async function getTvMazeEpisodes(name, { forceRefresh = false } = {}) {
 
 module.exports = {
   getDiscovery,
+  getImdbId,
   getImdbRatings,
   getCollection,
   getMovie,

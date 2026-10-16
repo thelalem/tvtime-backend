@@ -93,3 +93,29 @@ test('the memory cache keeps to its size and drops the least recently used first
     delete process.env.PROVIDER_CACHE_MAX_MB;
   }
 });
+
+test('a show is found on TVMaze by its IMDb id before its name', async () => {
+  const asked = [];
+  const json = (body, status = 200) => ({
+    ok: status === 200, status, headers: { get: () => null }, json: async () => body,
+  });
+  const previous = undici.fetch;
+  undici.fetch = async (url) => {
+    const href = String(url);
+    asked.push(href.includes('/lookup/') ? 'imdb' : 'name');
+    if (href.includes('imdb=tt0386676')) return json({ id: 526, name: 'The Office' });
+    if (href.includes('/lookup/')) return json({}, 404);
+    return json({ id: 999, name: 'The Office (UK)' });
+  };
+  try {
+    const tmdb = freshTmdb();
+    assert.equal((await tmdb.getTvMazeShow('The Office', { imdbId: 'tt0386676' })).id, 526);
+    assert.deepEqual(asked, ['imdb'], 'the name was not needed');
+
+    asked.length = 0;
+    assert.equal((await tmdb.getTvMazeShow('The Office', { imdbId: 'tt0000001' })).id, 999);
+    assert.deepEqual(asked, ['imdb', 'name'], 'no show under that id: the name is the fallback');
+  } finally {
+    undici.fetch = previous;
+  }
+});

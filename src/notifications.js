@@ -23,12 +23,18 @@ const INVALID_TOKEN_CODES = new Set([
   'messaging/invalid-argument',
 ]);
 
+// When TVMaze could not be asked, the latest a push waits for it on the air date (user's zone).
+const UNANSWERED_FALLBACK_HOUR = 21;
+
 // When this episode should be announced: its air time in the network's zone when TVMaze knows
-// both, otherwise FALLBACK_HOUR on the air date in the user's own zone.
+// both, otherwise FALLBACK_HOUR on the air date in the user's own zone. When TVMaze did not answer
+// (slow or down) the air time is not known to be missing, so the push waits, worked out again at
+// every sweep, until UNANSWERED_FALLBACK_HOUR: a 9 p.m. episode used to go out at 9 a.m.
 function announceAt(item, userTimeZone) {
   const airDate = item.episode?.airDate;
+  const fallbackHour = item.tvMazeAnswered === false ? UNANSWERED_FALLBACK_HOUR : FALLBACK_HOUR;
   return zonedDateTimeToUtc(airDate, item.airTime, item.timezone)
-    || zonedDateTimeToUtc(airDate, `${FALLBACK_HOUR}:00`, userTimeZone || 'UTC');
+    || zonedDateTimeToUtc(airDate, `${fallbackHour}:00`, userTimeZone || 'UTC');
 }
 
 function episodeLabel(season, episode) {

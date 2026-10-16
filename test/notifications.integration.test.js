@@ -236,3 +236,22 @@ test('sweep: daytime pushes make sound; an episode older than a day is not annou
   const old = [item(601, 'Old', 1, 1, '2026-10-14')];
   assert.equal(await sweep(uid, old, send), 0);
 });
+
+test('sweep: with no answer from TVMaze it waits for one, sending by 21:00 at the latest', async () => {
+  const uid = newUser();
+  await setup(uid); // Addis Ababa, UTC+3: 12:00 UTC is 15:00 local, past the 09:00 mark
+  const calls = [];
+  const send = async (tokens, message) => { calls.push(message); return []; };
+  const unanswered = [{ ...item(700, 'Evening Show', 2, 1, '2026-10-16'), tvMazeAnswered: false }];
+
+  assert.equal(await sweep(uid, unanswered, send), 0, 'not at 09:00: its real time may be later');
+  // TVMaze answers, with no air time (a streaming show): the 09:00 fallback applies.
+  const answered = [{ ...unanswered[0], tvMazeAnswered: true }];
+  assert.equal(await sweep(uid, answered, send), 1);
+
+  const uid2 = newUser();
+  await setup(uid2);
+  const stillUnanswered = [{ ...item(701, 'Outage Show', 1, 1, '2026-10-16'), tvMazeAnswered: false }];
+  assert.equal(await sweep(uid2, stillUnanswered, send, new Date('2026-10-16T17:50:00Z')), 0, '20:50 local');
+  assert.equal(await sweep(uid2, stillUnanswered, send, new Date('2026-10-16T18:10:00Z')), 1, '21:10 local');
+});

@@ -1,4 +1,5 @@
 const {
+  getImdbId,
   getTvMazeEpisodes,
   getTvMazeShow,
   getTvShowClassificationData,
@@ -242,23 +243,37 @@ async function buildSeriesUpcoming(show, { data, episodes }, today, forceRefresh
   if (!upcoming.length) return [];
 
   const name = data.name || show.name;
+  // By IMDb id where TMDB has one, so a remake is not mistaken for the show it
+  // shares a name with (tmdb.js, getTvMazeShow).
+  const imdbIdLookup = getImdbId(show.id).catch(() => null);
   // Deadlined separately, not as one race over both: the show lookup is what
   // carries the airtime and the network, and bundling it with the longer
   // episode list threw that away whenever the list was the slow half. Each
   // `catch` is attached before its deadline, so a rejection arriving after the
   // deadline has been answered is still handled.
-  const [tvMazeShow, tvMazeEpisodes] = await Promise.all([
+  //
+  // A failure or a missed deadline is told apart from TVMaze answering "no
+  // such show": notifications wait for a real answer before falling back to
+  // 9 a.m., which used to announce a 9 p.m. episode twelve hours early.
+  const noAnswer = Symbol('no TVMaze answer');
+  const [tvMazeShowAnswer, tvMazeEpisodes] = await Promise.all([
     withDeadline(
-      getTvMazeShow(name, { forceRefresh }).catch(() => null),
+      imdbIdLookup
+        .then((imdbId) => getTvMazeShow(name, { forceRefresh, imdbId }))
+        .catch(() => noAnswer),
       tvMazeEnrichmentTimeoutMs,
-      null,
+      noAnswer,
     ),
     withDeadline(
-      getTvMazeEpisodes(name, { forceRefresh }).catch(() => []),
+      imdbIdLookup
+        .then((imdbId) => getTvMazeEpisodes(name, { forceRefresh, imdbId }))
+        .catch(() => []),
       tvMazeEnrichmentTimeoutMs,
       [],
     ),
   ]);
+  const tvMazeAnswered = tvMazeShowAnswer !== noAnswer;
+  const tvMazeShow = tvMazeAnswered ? tvMazeShowAnswer : null;
 
   const schedule = tvMazeShow?.schedule || {};
   const network = tvMazeShow?.network || tvMazeShow?.webChannel || null;
@@ -287,6 +302,9 @@ async function buildSeriesUpcoming(show, { data, episodes }, today, forceRefresh
       // TVMaze keeps the zone on the network's country, not in the schedule, so a show with an air
       // time but no zone (every streaming show has neither) cannot be placed on the clock.
       timezone: schedule.timezone || network?.country?.timezone || null,
+      // False when TVMaze could not be asked: no air time means "unknown yet",
+      // not "streaming, no time" (notifications.js, announceAt).
+      tvMazeAnswered,
       totalEpisodes,
       isPremiere: Number(episode.season_number) > 0 && Number(episode.episode_number) === 1,
       isLatest: index === 0 && isDate(previousDate) &&
