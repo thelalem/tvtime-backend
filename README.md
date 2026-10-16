@@ -93,6 +93,20 @@ The PostgreSQL tables are created on startup. User-data endpoints live under
   `watched: true`: the day the user says they watched those episodes. It must be a real date, at most a day
   ahead (400 `invalid_watched_at` otherwise); without it the time of the request is used. A past `watchedAt`
   never moves the show's `lastWatched` backwards.
+- Rewatches and rewatch passes (`FEATURE_PLAN.md`, section 14; rules in `src/rewatch-logic.js`, routes in
+  `src/rewatches.js`). Every progress row (`/me/progress`, `/me/progress/:id`, `watchlist-view`, the episode-marking
+  and import answers) now also carries `rewatches` (`{ "S1E2": [ { at, source: "pass"|"manual", pass? } ] }`, oldest first),
+  `rewatchCount` (all rewatches, for the totals) and `rewatchPasses` (`[ { season, target, startedAt, episodes } ]`). An
+  episode's level is 0 if unwatched, else 1 + its rewatches; a pass covers a season's watched episodes and aims one level
+  above the lowest, and ends by itself when all of them reach it. Under `/api/v1/me/progress/:showId/rewatch`, each
+  answering `{ progress, completedSeasons? , removed? , added? }`:
+  - `POST /passes` `{ season }` starts a pass (409 `pass_open`, 409 `nothing_to_rewatch`);
+  - `POST /passes/:season/stop` ends it and keeps the ticks; `/cancel` ends it and takes back what it added (`removed`);
+    `/finish` `{ at? }` marks every episode still to do (`added`);
+  - `PUT /episodes/:key` `{ at? }` adds a rewatch (409 `not_watched`; counts for the pass when one wants the episode);
+    `DELETE /episodes/:key` takes off the latest (404 `no_rewatch`);
+  - `POST /seasons/:season/remove-last` takes one watch off every rewatched episode (409 `pass_open` while a pass is open).
+  Un-ticking an episode (or an import that does) forgets its rewatches and ends a pass with nothing left to do.
 - Movies (see `FEATURE_PLAN.md`, section 4). A watched movie is always on the movie watchlist; `watchedOn`
   (`YYYY-MM-DD` or `null`) says whether and when it was watched. The server fetches the movie from TMDB,
   so a client sends no movie body:

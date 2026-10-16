@@ -77,7 +77,22 @@ async function initializeDatabase() {
       ['next_season', 'INTEGER'],
       ['next_episode', 'INTEGER'],
       ['unwatched_released_count', 'INTEGER'],
+      // Rewatches (FEATURE_PLAN.md section 14): { "S1E2": [ { at, source, pass? } ] }, see rewatch-logic.js.
+      ['rewatches', "JSONB NOT NULL DEFAULT '{}'::jsonb"],
     ])}
+
+    -- Open rewatch passes: one row per season being rewatched. episodes is the season's watched episodes
+    -- when the pass began and target_level the level they are being taken to; the row is deleted when
+    -- the pass finishes or is stopped (rewatch-logic.js).
+    CREATE TABLE IF NOT EXISTS rewatch_passes (
+      firebase_uid TEXT NOT NULL REFERENCES app_users(firebase_uid) ON DELETE CASCADE,
+      series_id BIGINT NOT NULL,
+      season INTEGER NOT NULL,
+      target_level INTEGER NOT NULL,
+      started_at TIMESTAMPTZ NOT NULL,
+      episodes JSONB NOT NULL,
+      PRIMARY KEY (firebase_uid, series_id, season)
+    );
 
     -- When an episode was last unmarked. Kept apart from show_progress on
     -- purpose: a row here is invisible to the watchlist, All Shows and the

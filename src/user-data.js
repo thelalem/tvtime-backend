@@ -11,6 +11,9 @@ const { clearShowState, loadShowStates, registerShowStateRoutes } = require('./s
 const { hasAired, isValidTimeZone, localDateString } = require('./local-date');
 const { EPISODE_KEY, markEpisodes, mergeImportedActions, toMs } = require('./episode-merge');
 const { sendJsonWithEtag } = require('./etag');
+const { PROGRESS_COLUMNS } = require('./progress-columns');
+const { registerRewatchRoutes } = require('./rewatches');
+const { cleanRewatches, reconcilePasses } = require('./rewatch-logic');
 
 // Case-sensitive, like the sign-in check below: Express matched /ME/watchlist
 // to the /me routes by default, past the check that only looks at /me/, and
@@ -65,6 +68,7 @@ router.use(async (request, response, next) => {
 registerMeMovieRoutes(router);
 registerShowStateRoutes(router);
 registerNotificationRoutes(router);
+registerRewatchRoutes(router);
 registerEpisodeDataRoutes(router);
 
 router.get('/me', async (request, response, next) => {
@@ -153,15 +157,7 @@ router.delete('/me/avatar', async (request, response, next) => {
 router.get('/me/progress', async (request, response, next) => {
   try {
     const { rows } = await pool.query(
-      `SELECT series_id AS "seriesId", current_season AS "currentSeason",
-        current_episode AS "currentEpisode", watched_episodes AS "watchedEpisodes",
-        watched_episode_dates AS "watchedEpisodeDates", watched_count AS "watchedCount",
-        total_episodes AS "totalEpisodes", last_watched AS "lastWatched",
-        show_name AS "showName", poster_path AS "posterPath", backdrop_path AS "backdropPath",
-        classification, classification_checked_at AS "classificationCheckedAt",
-        released_episode_count AS "releasedEpisodeCount", is_ended AS "isEnded",
-        next_season AS "nextSeason", next_episode AS "nextEpisode",
-        unwatched_released_count AS "unwatchedCount"
+      `SELECT ${PROGRESS_COLUMNS}
        FROM show_progress WHERE firebase_uid=$1 ORDER BY updated_at DESC`,
       [request.user.uid],
     );
@@ -178,16 +174,7 @@ router.get('/me/watchlist-view', async (request, response, next) => {
         [request.user.uid],
       ),
       pool.query(
-        `SELECT series_id AS "seriesId", current_season AS "currentSeason",
-          current_episode AS "currentEpisode", watched_episodes AS "watchedEpisodes",
-          watched_episode_dates AS "watchedEpisodeDates", watched_count AS "watchedCount",
-          total_episodes AS "totalEpisodes", last_watched AS "lastWatched",
-          show_name AS "showName", poster_path AS "posterPath",
-          backdrop_path AS "backdropPath", classification,
-          classification_checked_at AS "classificationCheckedAt",
-          released_episode_count AS "releasedEpisodeCount", is_ended AS "isEnded",
-          next_season AS "nextSeason", next_episode AS "nextEpisode",
-          unwatched_released_count AS "unwatchedCount"
+        `SELECT ${PROGRESS_COLUMNS}
          FROM show_progress WHERE firebase_uid=$1 ORDER BY updated_at DESC`,
         [request.user.uid],
       ),
@@ -448,15 +435,44 @@ router.delete('/me/:collection/:seriesId', async (request, response, next) => {
   } catch (error) { next(error); }
 });
 
-const PROGRESS_COLUMNS = `series_id AS "seriesId",current_season AS "currentSeason",
-  current_episode AS "currentEpisode",watched_episodes AS "watchedEpisodes",
-  watched_episode_dates AS "watchedEpisodeDates",watched_count AS "watchedCount",
-  total_episodes AS "totalEpisodes",last_watched AS "lastWatched",
-  show_name AS "showName",poster_path AS "posterPath",backdrop_path AS "backdropPath",
-  classification,classification_checked_at AS "classificationCheckedAt",
-  released_episode_count AS "releasedEpisodeCount",is_ended AS "isEnded",
-  next_season AS "nextSeason",next_episode AS "nextEpisode",
-  unwatched_released_count AS "unwatchedCount"`;
+// After the watched episodes changed: end the rewatch passes that are over (everything in them done, or
+// nothing left watched), the same rule the rewatch routes apply (see rewatch-logic.js).
+async function endOverPasses(db, uid, seriesId, watched, rewatches) {
+  const { rows } = await db.query(
+    `SELECT season, target_level, started_at, episodes FROM rewatch_passes
+     WHERE firebase_uid=$1 AND series_id=$2`,
+    [uid, seriesId],
+  );
+  if (!rows.length) return false;
+  const passes = rows.map((row) => ({
+    season: row.season,
+    target: row.target_level,
+    startedAt: row.started_at.getTime(),
+    episodes: Array.isArray(row.episodes) ? row.episodes.map(String) : [],
+  }));
+  const { open } = reconcilePasses(passes, new Set(watched), rewatches);
+  const keep = new Set(open.map((pass) => pass.season));
+  let ended = false;
+  for (const pass of passes) {
+    if (keep.has(pass.season)) continue;
+    await db.query(
+      'DELETE FROM rewatch_passes WHERE firebase_uid=$1 AND series_id=$2 AND season=$3',
+      [uid, seriesId, pass.season],
+    );
+    ended = true;
+  }
+  return ended;
+}
+
+// The progress row as the routes answer with it, read again after a pass was ended in the same request
+// (the row returned by the write was built before that).
+async function readProgressRow(db, uid, seriesId) {
+  const { rows } = await db.query(
+    `SELECT ${PROGRESS_COLUMNS} FROM show_progress WHERE firebase_uid=$1 AND series_id=$2`,
+    [uid, seriesId],
+  );
+  return rows[0];
+}
 
 // The remembered unwatch dates for one show, as { 'S1E2': isoDate }. These live
 // in their own table and are read only by the episode-marking and import
@@ -554,7 +570,7 @@ router.patch('/me/progress/:seriesId/episodes', async (request, response, next) 
     await db.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))',
       [`${request.user.uid}:${seriesId}`]);
     const { rows: existingRows } = await db.query(
-      `SELECT watched_episodes, watched_episode_dates, last_watched, total_episodes
+      `SELECT watched_episodes, watched_episode_dates, last_watched, total_episodes, rewatches
        FROM show_progress WHERE firebase_uid=$1 AND series_id=$2`,
       [request.user.uid, seriesId],
     );
@@ -577,6 +593,8 @@ router.patch('/me/progress/:seriesId/episodes', async (request, response, next) 
     );
     const episodes = marked.watched;
     const dates = marked.dates;
+    // An episode that is no longer watched forgets its rewatches.
+    const keptRewatches = cleanRewatches(existing?.rewatches || {}, episodes);
     // A past date the user picked must not make the show look "watched most recently".
     const previousLast = existing?.last_watched ? new Date(existing.last_watched) : null;
     const lastWatched = episodes.size === 0
@@ -591,12 +609,13 @@ router.patch('/me/progress/:seriesId/episodes', async (request, response, next) 
       `INSERT INTO show_progress(firebase_uid,series_id,current_season,current_episode,
         watched_episodes,watched_episode_dates,watched_count,total_episodes,last_watched,
         show_name,poster_path,backdrop_path,classification,classification_checked_at,
-        released_episode_count,is_ended)
-       VALUES ($1,$2,$3,$4,$5::jsonb,$6::jsonb,$7,$8,$9,$10,$11,$12,NULL,NULL,0,FALSE)
+        released_episode_count,is_ended,rewatches)
+       VALUES ($1,$2,$3,$4,$5::jsonb,$6::jsonb,$7,$8,$9,$10,$11,$12,NULL,NULL,0,FALSE,$13::jsonb)
        ON CONFLICT(firebase_uid,series_id) DO UPDATE SET
         current_season=EXCLUDED.current_season,current_episode=EXCLUDED.current_episode,
         watched_episodes=EXCLUDED.watched_episodes,
         watched_episode_dates=EXCLUDED.watched_episode_dates,
+        rewatches=EXCLUDED.rewatches,
         watched_count=EXCLUDED.watched_count,total_episodes=EXCLUDED.total_episodes,
         last_watched=EXCLUDED.last_watched,
         show_name=COALESCE(EXCLUDED.show_name,show_progress.show_name),
@@ -608,11 +627,13 @@ router.patch('/me/progress/:seriesId/episodes', async (request, response, next) 
       [request.user.uid, seriesId, body.currentSeason, body.currentEpisode,
        JSON.stringify([...episodes]), JSON.stringify(dates), episodes.size, totalEpisodes,
        lastWatched, optionalString(body.showName), optionalString(body.posterPath),
-       optionalString(body.backdropPath)],
+       optionalString(body.backdropPath), JSON.stringify(keptRewatches)],
     );
     await saveUnwatched(db, request.user.uid, seriesId, unwatchedBefore, marked.unwatched);
+    const endedPass = await endOverPasses(db, request.user.uid, seriesId, episodes, keptRewatches);
+    const answer = endedPass ? await readProgressRow(db, request.user.uid, seriesId) : rows[0];
     await db.query('COMMIT');
-    response.json(rows[0]);
+    response.json(answer);
     scheduleClassificationRefresh(request.user.uid, rows[0].seriesId);
   } catch (error) {
     await db.query('ROLLBACK').catch(() => {});
@@ -658,7 +679,7 @@ router.post('/me/progress/:seriesId/import', async (request, response, next) => 
       [`${request.user.uid}:${seriesId}`]);
     const { rows: existingRows } = await db.query(
       `SELECT watched_episodes, watched_episode_dates, last_watched, total_episodes,
-              current_season, current_episode
+              current_season, current_episode, rewatches
        FROM show_progress WHERE firebase_uid=$1 AND series_id=$2`,
       [request.user.uid, seriesId],
     );
@@ -696,16 +717,19 @@ router.post('/me/progress/:seriesId/import', async (request, response, next) => 
     const lastWatched = candidates.length ? new Date(Math.max(...candidates)) : null;
     const totalEpisodes = Number.isInteger(body.totalEpisodes) && body.totalEpisodes > 0
       ? body.totalEpisodes : (existing?.total_episodes ?? 0);
+    // An episode the import un-ticked forgets its rewatches.
+    const keptRewatches = cleanRewatches(existing?.rewatches || {}, merged.watched);
 
     const { rows } = await db.query(
       `INSERT INTO show_progress(firebase_uid,series_id,current_season,current_episode,
         watched_episodes,watched_episode_dates,watched_count,total_episodes,last_watched,
         show_name,poster_path,backdrop_path,classification,classification_checked_at,
-        released_episode_count,is_ended)
-       VALUES ($1,$2,$3,$4,$5::jsonb,$6::jsonb,$7,$8,$9,$10,$11,$12,NULL,NULL,0,FALSE)
+        released_episode_count,is_ended,rewatches)
+       VALUES ($1,$2,$3,$4,$5::jsonb,$6::jsonb,$7,$8,$9,$10,$11,$12,NULL,NULL,0,FALSE,$13::jsonb)
        ON CONFLICT(firebase_uid,series_id) DO UPDATE SET
         watched_episodes=EXCLUDED.watched_episodes,
         watched_episode_dates=EXCLUDED.watched_episode_dates,
+        rewatches=EXCLUDED.rewatches,
         watched_count=EXCLUDED.watched_count,total_episodes=EXCLUDED.total_episodes,
         last_watched=EXCLUDED.last_watched,
         show_name=COALESCE(EXCLUDED.show_name,show_progress.show_name),
@@ -718,10 +742,12 @@ router.post('/me/progress/:seriesId/import', async (request, response, next) => 
        existing?.current_episode ?? 1, JSON.stringify([...merged.watched]),
        JSON.stringify(merged.dates), merged.watched.size, totalEpisodes, lastWatched,
        optionalString(body.showName), optionalString(body.posterPath),
-       optionalString(body.backdropPath)],
+       optionalString(body.backdropPath), JSON.stringify(keptRewatches)],
     );
+    const endedPass = await endOverPasses(db, request.user.uid, seriesId, merged.watched, keptRewatches);
+    const answer = endedPass ? await readProgressRow(db, request.user.uid, seriesId) : rows[0];
     await db.query('COMMIT');
-    response.json(rows[0]);
+    response.json(answer);
     scheduleClassificationRefresh(request.user.uid, rows[0].seriesId);
   } catch (error) {
     await db.query('ROLLBACK').catch(() => {});
@@ -765,6 +791,8 @@ router.delete('/me/progress/:seriesId', async (request, response, next) => {
       // Deleting a show's history on purpose also forgets what was unmarked, so
       // an import can restore it.
       await db.query('DELETE FROM unwatched_episodes WHERE firebase_uid=$1 AND series_id=$2',
+        [request.user.uid, seriesId]);
+      await db.query('DELETE FROM rewatch_passes WHERE firebase_uid=$1 AND series_id=$2',
         [request.user.uid, seriesId]);
     });
     response.status(204).end();
