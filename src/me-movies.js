@@ -1,6 +1,11 @@
 const { pool } = require('./db');
 const { getMovie, withImdbRatings } = require('./tmdb');
 const { localDateString } = require('./local-date');
+
+// The calendar day after `date` (YYYY-MM-DD).
+function nextDay(date) {
+  return new Date(Date.parse(`${date}T00:00:00Z`) + 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+}
 const {
   getMovieRecommendationsFor,
   invalidateMovieRecommendations,
@@ -142,14 +147,18 @@ function registerMeMovieRoutes(router) {
     if (!isRealDate(date)) {
       return response.status(400).json({ error: 'invalid_date' });
     }
-    const today = await userToday(request.user.uid);
-    if (date > today) {
+    // One day of slack, as the episode route allows: the zone on file can lag the
+    // phone's (a new account, a failed report), and just after midnight in
+    // UTC+3 the phone's today was refused as "in the future", for ticks and
+    // for Trakt imports alike.
+    const latest = nextDay(await userToday(request.user.uid));
+    if (date > latest) {
       return response.status(400).json({ error: 'date_in_future' });
     }
 
     const movie = await loadMovie(request.params.movieId);
     // No release date on record is not treated as unreleased; TMDB lacks one for some old titles.
-    if (movie.release_date && movie.release_date > today) {
+    if (movie.release_date && movie.release_date > latest) {
       return response.status(409).json({ error: 'not_released', releaseDate: movie.release_date });
     }
 

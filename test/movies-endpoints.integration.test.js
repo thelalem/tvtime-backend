@@ -219,6 +219,17 @@ test("'today' follows the user's timezone, not the server's", async () => {
   assert.equal(ticked.status, 200, `UTC+14 today (${localToday}) must be accepted`);
 });
 
+test("a day of slack: the phone's today may be a day ahead of the zone on file", async () => {
+  const uid = newUser();
+  await api(uid, 'GET', '/me'); // no zone reported yet: the server uses UTC
+  const day = (offset) => new Date(Date.now() + offset * 86400000).toISOString().slice(0, 10);
+  const tomorrow = await api(uid, 'PUT', '/me/movies/watchlist/101/watched', { date: day(1) });
+  assert.equal(tomorrow.status, 200, 'UTC+3 just after midnight');
+  const later = await api(uid, 'PUT', '/me/movies/watchlist/101/watched', { date: day(2) });
+  assert.equal(later.status, 400);
+  assert.equal(later.body.error, 'date_in_future');
+});
+
 test('un-ticking clears the date and keeps the movie on the watchlist', async () => {
   const uid = newUser();
   await api(uid, 'PUT', '/me/movies/watchlist/101/watched', { date: today() });
