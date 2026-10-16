@@ -58,6 +58,9 @@ The PostgreSQL tables are created on startup. User-data endpoints live under
 - `GET /api/v1/me/watchlist` and `PUT`, `DELETE /api/v1/me/watchlist/:showId`
 - `GET /api/v1/me/watchlist-view` returns the watchlist and progress in one
   response for the Watchlist page
+  Each progress row also has `nextSeason`, `nextEpisode` (the earliest aired episode not yet watched,
+  `null` when caught up) and `unwatchedCount` (aired episodes not watched), computed with the
+  classification; all three are `null` until a show has been classified once more.
 - `GET /api/v1/me/upcoming?today=YYYY-MM-DD` returns the assembled Upcoming
   feed for the signed-in user's watchlist and progress history. Results are
   cached per show and local calendar date for 24 hours; pass `refresh=true` to

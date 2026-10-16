@@ -249,7 +249,7 @@ test('repeating the same import changes nothing', async () => {
   const actions = [act('S1E1', true, '2026-06-30T16:18:00Z'), act('S1E2', false, '2026-07-01T00:00:00Z'), act('S1E3', true, '2026-07-02T00:00:00Z')];
   const first = await importShow(uid, actions, { totalEpisodes: 6 });
   const second = await importShow(uid, actions, { totalEpisodes: 6 });
-  const strip = ({ classification, classificationCheckedAt, ...rest }) => rest;
+  const strip = ({ classification, classificationCheckedAt, nextSeason, nextEpisode, unwatchedCount, ...rest }) => rest;
   assert.deepEqual(strip(second.body), strip(first.body));
   assert.equal((await unwatchedRows(uid)).length, 1);
 });
@@ -387,4 +387,27 @@ test('a classification from an earlier local day is stale and recomputed', async
   assert.equal((await progress(uid)).body.classification, 'upToDate');
   const again = await api(uid, 'POST', '/me/refresh-classifications', {});
   assert.equal(again.body.refreshed, 0, 'now fresh for today: left alone');
+});
+
+test('classification records the next unwatched aired episode and how many are unwatched', async () => {
+  tmdbState.seasons = [{ season_number: 1 }];
+  tmdbState.episodes = [
+    { episode_number: 1, air_date: '2000-01-01' },
+    { episode_number: 2, air_date: '2000-01-08' },
+    { episode_number: 3, air_date: '2000-01-15' },
+    { episode_number: 4, air_date: '2999-01-01' }, // not aired: neither next nor counted
+  ];
+  const uid = newUser();
+  await importShow(uid, [act('S1E1', true, '2026-06-30T16:18:00Z'), act('S1E3', true, '2026-07-01T00:00:00Z')]);
+  await api(uid, 'POST', '/me/refresh-classifications', {});
+  const row = (await progress(uid)).body;
+  assert.equal(row.nextSeason, 1);
+  assert.equal(row.nextEpisode, 2, 'the earliest unwatched aired episode');
+  assert.equal(row.unwatchedCount, 1);
+
+  await importShow(uid, [act('S1E2', true, '2026-07-02T00:00:00Z')]);
+  await api(uid, 'POST', '/me/refresh-classifications', {});
+  const caughtUp = (await progress(uid)).body;
+  assert.equal(caughtUp.nextEpisode, null);
+  assert.equal(caughtUp.unwatchedCount, 0);
 });

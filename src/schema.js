@@ -58,7 +58,12 @@ async function initializeDatabase() {
       -- The user's local calendar date (YYYY-MM-DD) the classification was
       -- computed for. "Aired" depends on that date, so a classification from an
       -- earlier local day is stale even when it is recent.
-      ADD COLUMN IF NOT EXISTS classification_date TEXT;
+      ADD COLUMN IF NOT EXISTS classification_date TEXT,
+      -- The first aired episode the user has not watched, and how many aired episodes that is
+      -- (computed with the classification). NULL until the show has been classified once more.
+      ADD COLUMN IF NOT EXISTS next_season INTEGER,
+      ADD COLUMN IF NOT EXISTS next_episode INTEGER,
+      ADD COLUMN IF NOT EXISTS unwatched_released_count INTEGER;
 
     -- When an episode was last unmarked. Kept apart from show_progress on
     -- purpose: a row here is invisible to the watchlist, All Shows and the

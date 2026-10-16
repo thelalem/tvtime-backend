@@ -151,7 +151,9 @@ router.get('/me/progress', async (request, response, next) => {
         total_episodes AS "totalEpisodes", last_watched AS "lastWatched",
         show_name AS "showName", poster_path AS "posterPath", backdrop_path AS "backdropPath",
         classification, classification_checked_at AS "classificationCheckedAt",
-        released_episode_count AS "releasedEpisodeCount", is_ended AS "isEnded"
+        released_episode_count AS "releasedEpisodeCount", is_ended AS "isEnded",
+        next_season AS "nextSeason", next_episode AS "nextEpisode",
+        unwatched_released_count AS "unwatchedCount"
        FROM show_progress WHERE firebase_uid=$1 ORDER BY updated_at DESC`,
       [request.user.uid],
     );
@@ -175,7 +177,9 @@ router.get('/me/watchlist-view', async (request, response, next) => {
           show_name AS "showName", poster_path AS "posterPath",
           backdrop_path AS "backdropPath", classification,
           classification_checked_at AS "classificationCheckedAt",
-          released_episode_count AS "releasedEpisodeCount", is_ended AS "isEnded"
+          released_episode_count AS "releasedEpisodeCount", is_ended AS "isEnded",
+          next_season AS "nextSeason", next_episode AS "nextEpisode",
+          unwatched_released_count AS "unwatchedCount"
          FROM show_progress WHERE firebase_uid=$1 ORDER BY updated_at DESC`,
         [request.user.uid],
       ),
@@ -300,7 +304,8 @@ router.post('/me/refresh-classifications', async (request, response, next) => {
     const { rows } = await pool.query(
       `SELECT p.series_id AS "seriesId", p.classification,
               p.classification_checked_at AS "classificationCheckedAt",
-              p.classification_date AS "classificationDate", u.timezone
+              p.classification_date AS "classificationDate",
+              p.unwatched_released_count AS "unwatchedCount", u.timezone
        FROM show_progress p
        JOIN app_users u ON u.firebase_uid = p.firebase_uid
        WHERE p.firebase_uid=$1
@@ -420,7 +425,9 @@ const PROGRESS_COLUMNS = `series_id AS "seriesId",current_season AS "currentSeas
   total_episodes AS "totalEpisodes",last_watched AS "lastWatched",
   show_name AS "showName",poster_path AS "posterPath",backdrop_path AS "backdropPath",
   classification,classification_checked_at AS "classificationCheckedAt",
-  released_episode_count AS "releasedEpisodeCount",is_ended AS "isEnded"`;
+  released_episode_count AS "releasedEpisodeCount",is_ended AS "isEnded",
+  next_season AS "nextSeason",next_episode AS "nextEpisode",
+  unwatched_released_count AS "unwatchedCount"`;
 
 // The remembered unwatch dates for one show, as { 'S1E2': isoDate }. These live
 // in their own table and are read only by the episode-marking and import
@@ -765,6 +772,8 @@ function collectionTable(name) {
 function isClassificationFresh(progress, maxAgeMs, today) {
   if (!progress.classification) return false;
   if (progress.classificationDate !== today) return false;
+  // Classified before the next-episode fields existed: recompute once.
+  if (progress.unwatchedCount == null) return false;
   const checkedAt = progress.classificationCheckedAt
     ? new Date(progress.classificationCheckedAt).getTime()
     : NaN;
@@ -832,7 +841,8 @@ async function refreshStaleClassifications() {
   const { rows: all } = await pool.query(
     `SELECT p.firebase_uid AS uid, p.series_id AS "seriesId", p.classification,
             p.classification_checked_at AS "classificationCheckedAt",
-            p.classification_date AS "classificationDate", u.timezone
+            p.classification_date AS "classificationDate",
+            p.unwatched_released_count AS "unwatchedCount", u.timezone
      FROM show_progress p
      JOIN app_users u ON u.firebase_uid = p.firebase_uid
      ORDER BY p.classification_checked_at ASC NULLS FIRST`,
@@ -892,12 +902,19 @@ async function refreshClassification(uid, seriesId) {
   const today = localDateString(rows[0].timezone);
   let releasedEpisodeCount = 0;
   let watchedReleasedCount = 0;
+  // The earliest aired episode not yet watched: what the Watch List widget shows as "next".
+  let next = null;
   for (const season of seasonResults) {
     for (const episode of Array.isArray(season.episodes) ? season.episodes : []) {
       if (!hasAired(episode.air_date, today)) continue;
       releasedEpisodeCount += 1;
       if (watched.has(`S${season.season_number}E${episode.episode_number}`)) {
         watchedReleasedCount += 1;
+      } else {
+        const candidate = [Number(season.season_number), Number(episode.episode_number)];
+        if (!next || candidate[0] < next[0] || (candidate[0] === next[0] && candidate[1] < next[1])) {
+          next = candidate;
+        }
       }
     }
   }
@@ -928,9 +945,12 @@ async function refreshClassification(uid, seriesId) {
   await pool.query(
     `UPDATE show_progress
      SET classification=$3,classification_checked_at=NOW(),
-         released_episode_count=$4,is_ended=$5,classification_date=$6
+         released_episode_count=$4,is_ended=$5,classification_date=$6,
+         next_season=$7,next_episode=$8,unwatched_released_count=$9
      WHERE firebase_uid=$1 AND series_id=$2`,
-    [uid, seriesId, classification, releasedEpisodeCount, isEnded, today],
+    [uid, seriesId, classification, releasedEpisodeCount, isEnded, today,
+      next ? next[0] : null, next ? next[1] : null,
+      releasedEpisodeCount - watchedReleasedCount],
   );
 
   if (releasedEpisodeCount === 0) return;
