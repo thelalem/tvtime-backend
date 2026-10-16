@@ -1,6 +1,8 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { markEpisodes, mergeImportedActions } = require('../src/episode-merge');
+const {
+  addCountedRewatches, markEpisodes, mergeImportedActions, onlyUnknownActions,
+} = require('../src/episode-merge');
 
 const empty = () => ({ watched: new Set(), dates: {}, unwatched: {} });
 const act = (key, watched, at) => ({ key, watched, at });
@@ -103,4 +105,29 @@ test('marking in the app keeps an existing date and clears a remembered unwatch'
 test('unmarking something that was never watched records nothing', () => {
   const next = markEpisodes(empty(), ['S1E1'], false, '2026-10-14T00:00:00.000Z');
   assert.deepEqual(state(next), { watched: [], dates: {}, unwatched: {} });
+});
+
+test('fill mode lets through only episodes the app knows nothing about', () => {
+  const known = {
+    watched: ['S1E1'],
+    dates: { S1E1: '2026-01-01T00:00:00Z' },
+    unwatched: { S1E2: '2026-02-01T00:00:00Z' },
+  };
+  const actions = [act('S1E1', true, '2026-09-01T00:00:00Z'), act('S1E2', true, '2026-09-01T00:00:00Z'), act('S1E3', true, '2020-01-01T00:00:00Z')];
+  assert.deepEqual(onlyUnknownActions(known, actions).map((a) => a.key), ['S1E3']);
+});
+
+test('counted rewatches top up to the count, one second apart after the episode date, and never twice', () => {
+  const watched = new Set(['S1E1', 'S1E2']);
+  const dates = { S1E1: '2020-03-08T16:23:11.000Z', S1E2: '2020-03-09T10:00:00.000Z' };
+  const counts = [{ key: 'S1E1', count: 2 }, { key: 'S1E2', count: 1 }, { key: 'S1E3', count: 1 }];
+  const once = addCountedRewatches({}, watched, dates, counts);
+  assert.deepEqual(once.S1E1.map((r) => r.at), ['2020-03-08T16:23:12.000Z', '2020-03-08T16:23:13.000Z']);
+  assert.equal(once.S1E1[0].source, 'manual');
+  assert.equal(once.S1E2.length, 1);
+  assert.equal('S1E3' in once, false, 'an episode that is not watched gets none');
+  assert.deepEqual(addCountedRewatches(once, watched, dates, counts), once);
+  // The app already has one rewatch: only the missing one is added.
+  const partial = addCountedRewatches({ S1E1: [{ at: '2026-01-01T00:00:00.000Z', source: 'manual' }] }, watched, dates, [{ key: 'S1E1', count: 2 }]);
+  assert.equal(partial.S1E1.length, 2);
 });

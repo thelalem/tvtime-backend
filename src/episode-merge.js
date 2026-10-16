@@ -90,4 +90,33 @@ function markEpisodes({ watched, dates, unwatched }, keys, isWatched, nowIso, { 
   return { watched: nextWatched, dates: nextDates, unwatched: nextUnwatched };
 }
 
-module.exports = { EPISODE_KEY, markEpisodes, mergeImportedActions, toMs };
+// An import that only fills gaps (the TV Time import, "the app's data wins"): an episode the app already
+// has watched keeps its date, and one the person un-ticked in the app stays un-ticked, so only episodes the
+// app knows nothing about get through.
+function onlyUnknownActions({ watched, unwatched }, actions) {
+  const have = new Set(watched);
+  return actions.filter((action) => !have.has(action.key) && toMs(unwatched[action.key]) === null);
+}
+
+// Rewatches an export says an episode had: `counts` is [{ key, count }]. An episode watched in the merged
+// result gets rewatches up to that count (never more than it has already, so running again adds nothing).
+// The export has no dates for them, so they are put one second apart after the episode's own date.
+// Returns a new rewatches object.
+function addCountedRewatches(rewatches, watched, dates, counts) {
+  const result = { ...rewatches };
+  for (const { key, count } of counts) {
+    if (!watched.has(key)) continue;
+    const base = toMs(dates[key]);
+    if (base === null) continue;
+    const list = [...(result[key] || [])];
+    for (let i = list.length; i < count; i += 1) {
+      list.push({ at: new Date(base + (i + 1) * 1000).toISOString(), source: 'manual' });
+    }
+    if (list.length) result[key] = list;
+  }
+  return result;
+}
+
+module.exports = {
+  EPISODE_KEY, addCountedRewatches, markEpisodes, mergeImportedActions, onlyUnknownActions, toMs,
+};

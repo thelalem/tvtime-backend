@@ -9,7 +9,9 @@ const { registerEpisodeDataRoutes } = require('./episode-data');
 const { registerNotificationRoutes } = require('./notifications');
 const { clearShowState, loadShowStates, registerShowStateRoutes } = require('./show-states');
 const { hasAired, isValidTimeZone, localDateString } = require('./local-date');
-const { EPISODE_KEY, markEpisodes, mergeImportedActions, toMs } = require('./episode-merge');
+const {
+  EPISODE_KEY, addCountedRewatches, markEpisodes, mergeImportedActions, onlyUnknownActions, toMs,
+} = require('./episode-merge');
 const { sendJsonWithEtag } = require('./etag');
 const { PROGRESS_COLUMNS } = require('./progress-columns');
 const { registerRewatchRoutes } = require('./rewatches');
@@ -648,7 +650,9 @@ router.patch('/me/progress/:seriesId/episodes', async (request, response, next) 
 // Merges imported watch records (for example from a Trakt export) into one
 // show, newest date winning per episode - see episode-merge.js. Sent as
 // `{ actions: [{ key, watched, at }], totalEpisodes?, showName?, posterPath?,
-// backdropPath?, summary?: { plays, lastWatched } }`.
+// backdropPath?, summary?: { plays, lastWatched }, mode?: 'fill', rewatchCounts?: [{ key, count }] }`.
+// `mode: 'fill'` only adds episodes the app knows nothing about (dates and un-ticks in the app win);
+// `rewatchCounts` tops an episode's rewatches up to the count (the TV Time import).
 //
 // Answers with the show's progress, or 204 when it ends up with no watched
 // episodes: a show with nothing watched has no progress row, exactly as before,
@@ -656,6 +660,13 @@ router.patch('/me/progress/:seriesId/episodes', async (request, response, next) 
 // about unwatched episodes is stored apart and is invisible there.
 //
 // Running the same request again changes nothing, so a client may retry it.
+// `rewatchCounts` of an import: at most 5000 of { key, count } with a count of 1 to 50.
+function validRewatchCounts(value) {
+  return value === undefined || (Array.isArray(value) && value.length <= 5000 &&
+    value.every((item) => item && typeof item === 'object' && typeof item.key === 'string' &&
+      EPISODE_KEY.test(item.key) && Number.isInteger(item.count) && item.count >= 1 && item.count <= 50));
+}
+
 router.post('/me/progress/:seriesId/import', async (request, response, next) => {
   const seriesId = Number.parseInt(request.params.seriesId, 10);
   const body = request.body || {};
@@ -667,6 +678,8 @@ router.post('/me/progress/:seriesId/import', async (request, response, next) => 
         typeof action.key === 'string' && EPISODE_KEY.test(action.key) &&
         typeof action.watched === 'boolean' && toMs(action.at) !== null) ||
       !isOptionalCount(body.totalEpisodes) ||
+      (body.mode !== undefined && body.mode !== 'fill') ||
+      !validRewatchCounts(body.rewatchCounts) ||
       (summary !== undefined && summary !== null &&
         (typeof summary !== 'object' || !isOptionalCount(summary.plays) ||
          !isOptionalDate(summary.lastWatched)))) {
@@ -687,14 +700,16 @@ router.post('/me/progress/:seriesId/import', async (request, response, next) => 
     );
     const existing = existingRows[0];
     const unwatchedBefore = await loadUnwatched(db, request.user.uid, seriesId);
+    const before = {
+      watched: Array.isArray(existing?.watched_episodes)
+        ? existing.watched_episodes.map(String) : [],
+      dates: plainObject(existing?.watched_episode_dates),
+      unwatched: unwatchedBefore,
+    };
+    // `mode: 'fill'` (the TV Time import): only episodes the app knows nothing about are added.
     const merged = mergeImportedActions(
-      {
-        watched: Array.isArray(existing?.watched_episodes)
-          ? existing.watched_episodes.map(String) : [],
-        dates: plainObject(existing?.watched_episode_dates),
-        unwatched: unwatchedBefore,
-      },
-      actions,
+      before,
+      body.mode === 'fill' ? onlyUnknownActions(before, actions) : actions,
     );
     await saveUnwatched(db, request.user.uid, seriesId, unwatchedBefore, merged.unwatched);
 
@@ -720,7 +735,10 @@ router.post('/me/progress/:seriesId/import', async (request, response, next) => 
     const totalEpisodes = Number.isInteger(body.totalEpisodes) && body.totalEpisodes > 0
       ? body.totalEpisodes : (existing?.total_episodes ?? 0);
     // An episode the import un-ticked forgets its rewatches.
-    const keptRewatches = cleanRewatches(existing?.rewatches || {}, merged.watched);
+    const keptRewatches = addCountedRewatches(
+      cleanRewatches(existing?.rewatches || {}, merged.watched),
+      merged.watched, merged.dates, body.rewatchCounts || [],
+    );
 
     const { rows } = await db.query(
       `INSERT INTO show_progress(firebase_uid,series_id,current_season,current_episode,

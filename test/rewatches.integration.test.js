@@ -282,3 +282,35 @@ test('an import that un-ticks an episode forgets its rewatches', async () => {
   assert.equal(imported.status, 200);
   assert.deepEqual(imported.body.rewatches, {});
 });
+
+test('TV Time import (fill mode): the app wins, gaps are filled, rewatches are topped up, rerun changes nothing', async () => {
+  const uid = newUser();
+  const imp = (body) => api(uid, 'POST', `/me/progress/${SHOW}/import`, { totalEpisodes: 10, showName: 'Show', ...body });
+  await watch(uid, ['S1E1']);                                   // watched in the app today
+  await watch(uid, ['S1E2']);
+  await watch(uid, ['S1E2'], false);                            // un-ticked in the app
+  const appDate = (await api(uid, 'GET', `/me/progress/${SHOW}`)).body.watchedEpisodeDates.S1E1;
+
+  const file = {
+    mode: 'fill',
+    actions: ['S1E1', 'S1E2', 'S1E3', 'S1E4'].map((key) => ({ key, watched: true, at: '2031-01-01T00:00:00Z' })),
+    rewatchCounts: [{ key: 'S1E1', count: 2 }, { key: 'S1E3', count: 1 }, { key: 'S1E2', count: 1 }],
+  };
+  const first = await imp(file);
+  assert.equal(first.status, 200);
+  assert.equal(first.body.watchedEpisodeDates.S1E1, appDate, "the app's own date stays, even though the file's is newer");
+  assert.equal(first.body.watchedEpisodes.includes('S1E2'), false, 'an episode un-ticked in the app stays un-ticked');
+  assert.ok(first.body.watchedEpisodes.includes('S1E3') && first.body.watchedEpisodes.includes('S1E4'));
+  assert.equal(first.body.watchedEpisodeDates.S1E3, '2031-01-01T00:00:00.000Z');
+  assert.equal(first.body.rewatches.S1E1.length, 2);
+  assert.equal(first.body.rewatches.S1E3.length, 1);
+  assert.equal('S1E2' in first.body.rewatches, false);
+
+  const second = await imp(file);
+  assert.deepEqual(second.body.rewatches, first.body.rewatches, 'a rerun adds no rewatches');
+  assert.deepEqual(second.body.watchedEpisodeDates, first.body.watchedEpisodeDates);
+
+  for (const bad of [{ mode: 'x' }, { rewatchCounts: [{ key: 'S1E1', count: 0 }] }, { rewatchCounts: [{ key: 'bad', count: 1 }] }]) {
+    assert.equal((await imp({ actions: [], ...bad })).status, 400);
+  }
+});
