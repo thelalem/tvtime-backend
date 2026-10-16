@@ -314,3 +314,19 @@ test('TV Time import (fill mode): the app wins, gaps are filled, rewatches are t
     assert.equal((await imp({ actions: [], ...bad })).status, 400);
   }
 });
+
+test('TV Time import with real rewatch dates, and the same request again', async () => {
+  const uid = newUser();
+  const body = {
+    mode: 'fill', totalEpisodes: 10, showName: 'Show',
+    actions: [{ key: 'S1E1', watched: true, at: '2020-01-01T00:00:00Z' }],
+    rewatchDates: [{ key: 'S1E1', ats: ['2020-06-01T00:00:00Z', '2021-06-01T00:00:00Z'] }],
+  };
+  const first = await api(uid, 'POST', `/me/progress/${SHOW}/import`, body);
+  assert.equal(first.status, 200);
+  assert.deepEqual(first.body.rewatches.S1E1.map((r) => r.at), ['2020-06-01T00:00:00.000Z', '2021-06-01T00:00:00.000Z']);
+  const second = await api(uid, 'POST', `/me/progress/${SHOW}/import`, body);
+  assert.deepEqual(second.body.rewatches, first.body.rewatches);
+  const bad = await api(uid, 'POST', `/me/progress/${SHOW}/import`, { ...body, rewatchDates: [{ key: 'S1E1', ats: ['nope'] }] });
+  assert.equal(bad.status, 400);
+});

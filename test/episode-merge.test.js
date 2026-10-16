@@ -1,7 +1,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const {
-  addCountedRewatches, markEpisodes, mergeImportedActions, onlyUnknownActions,
+  addCountedRewatches, addDatedRewatches, markEpisodes, mergeImportedActions, onlyUnknownActions,
 } = require('../src/episode-merge');
 
 const empty = () => ({ watched: new Set(), dates: {}, unwatched: {} });
@@ -130,4 +130,22 @@ test('counted rewatches top up to the count, one second apart after the episode 
   // The app already has one rewatch: only the missing one is added.
   const partial = addCountedRewatches({ S1E1: [{ at: '2026-01-01T00:00:00.000Z', source: 'manual' }] }, watched, dates, [{ key: 'S1E1', count: 2 }]);
   assert.equal(partial.S1E1.length, 2);
+});
+
+test('dated rewatches fill up to the exported number, keep your own, and never repeat', () => {
+  const watched = new Set(['S1E1', 'S1E2']);
+  const items = [
+    { key: 'S1E1', ats: ['2021-01-01T00:00:00Z', '2022-01-01T00:00:00Z'] },
+    { key: 'S1E2', ats: ['2021-05-05T00:00:00Z'] },
+    { key: 'S1E3', ats: ['2021-05-05T00:00:00Z'] },
+  ];
+  const once = addDatedRewatches({}, watched, items);
+  assert.deepEqual(once.S1E1.map((r) => r.at), ['2021-01-01T00:00:00.000Z', '2022-01-01T00:00:00.000Z']);
+  assert.equal(once.S1E2.length, 1);
+  assert.equal('S1E3' in once, false, 'an unwatched episode gets none');
+  assert.deepEqual(addDatedRewatches(once, watched, items), once);
+  // The app already has one rewatch (another day): only one of the two exported dates is added.
+  const own = addDatedRewatches({ S1E1: [{ at: '2026-02-02T00:00:00.000Z', source: 'manual' }] }, watched, [items[0]]);
+  assert.equal(own.S1E1.length, 2);
+  assert.ok(own.S1E1.some((r) => r.at === '2021-01-01T00:00:00.000Z'));
 });

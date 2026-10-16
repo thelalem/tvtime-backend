@@ -117,6 +117,28 @@ function addCountedRewatches(rewatches, watched, dates, counts) {
   return result;
 }
 
+// Rewatches an export has with their real dates: `items` is [{ key, ats: [date, ...] }]. An episode watched in
+// the merged result gets a rewatch for each date it does not have yet, until it has as many as the export
+// lists (so the app's own rewatches count, and running again adds nothing). Returns a new rewatches object.
+function addDatedRewatches(rewatches, watched, items) {
+  const result = { ...rewatches };
+  for (const { key, ats } of items) {
+    if (!watched.has(key)) continue;
+    const wanted = [...new Set(ats.map(toMs).filter((ms) => ms !== null))].sort((a, b) => a - b);
+    const list = [...(result[key] || [])];
+    const have = new Set(list.map((entry) => Date.parse(entry.at)));
+    for (const ms of wanted) {
+      if (list.length >= wanted.length) break;
+      if (have.has(ms)) continue;
+      list.push({ at: new Date(ms).toISOString(), source: 'manual' });
+      have.add(ms);
+    }
+    list.sort((a, b) => Date.parse(a.at) - Date.parse(b.at));
+    if (list.length) result[key] = list;
+  }
+  return result;
+}
+
 module.exports = {
-  EPISODE_KEY, addCountedRewatches, markEpisodes, mergeImportedActions, onlyUnknownActions, toMs,
+  EPISODE_KEY, addCountedRewatches, addDatedRewatches, markEpisodes, mergeImportedActions, onlyUnknownActions, toMs,
 };

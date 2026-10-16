@@ -10,7 +10,7 @@ const { registerNotificationRoutes } = require('./notifications');
 const { clearShowState, loadShowStates, registerShowStateRoutes } = require('./show-states');
 const { hasAired, isValidTimeZone, localDateString } = require('./local-date');
 const {
-  EPISODE_KEY, addCountedRewatches, markEpisodes, mergeImportedActions, onlyUnknownActions, toMs,
+  EPISODE_KEY, addCountedRewatches, addDatedRewatches, markEpisodes, mergeImportedActions, onlyUnknownActions, toMs,
 } = require('./episode-merge');
 const { sendJsonWithEtag } = require('./etag');
 const { PROGRESS_COLUMNS } = require('./progress-columns');
@@ -651,6 +651,7 @@ router.patch('/me/progress/:seriesId/episodes', async (request, response, next) 
 // show, newest date winning per episode - see episode-merge.js. Sent as
 // `{ actions: [{ key, watched, at }], totalEpisodes?, showName?, posterPath?,
 // backdropPath?, summary?: { plays, lastWatched }, mode?: 'fill', rewatchCounts?: [{ key, count }] }`.
+// `rewatchDates?: [{ key, ats }]` does the same with real dates.
 // `mode: 'fill'` only adds episodes the app knows nothing about (dates and un-ticks in the app win);
 // `rewatchCounts` tops an episode's rewatches up to the count (the TV Time import).
 //
@@ -667,6 +668,15 @@ function validRewatchCounts(value) {
       EPISODE_KEY.test(item.key) && Number.isInteger(item.count) && item.count >= 1 && item.count <= 50));
 }
 
+// `rewatchDates` of an import: at most 5000 of { key, ats: [1 to 50 dates, none more than a day ahead] }.
+function validRewatchDates(value) {
+  const limit = Date.now() + 24 * 60 * 60 * 1000;
+  return value === undefined || (Array.isArray(value) && value.length <= 5000 &&
+    value.every((item) => item && typeof item === 'object' && typeof item.key === 'string' &&
+      EPISODE_KEY.test(item.key) && Array.isArray(item.ats) && item.ats.length >= 1 && item.ats.length <= 50 &&
+      item.ats.every((at) => toMs(at) !== null && toMs(at) <= limit)));
+}
+
 router.post('/me/progress/:seriesId/import', async (request, response, next) => {
   const seriesId = Number.parseInt(request.params.seriesId, 10);
   const body = request.body || {};
@@ -680,6 +690,7 @@ router.post('/me/progress/:seriesId/import', async (request, response, next) => 
       !isOptionalCount(body.totalEpisodes) ||
       (body.mode !== undefined && body.mode !== 'fill') ||
       !validRewatchCounts(body.rewatchCounts) ||
+      !validRewatchDates(body.rewatchDates) ||
       (summary !== undefined && summary !== null &&
         (typeof summary !== 'object' || !isOptionalCount(summary.plays) ||
          !isOptionalDate(summary.lastWatched)))) {
@@ -735,9 +746,12 @@ router.post('/me/progress/:seriesId/import', async (request, response, next) => 
     const totalEpisodes = Number.isInteger(body.totalEpisodes) && body.totalEpisodes > 0
       ? body.totalEpisodes : (existing?.total_episodes ?? 0);
     // An episode the import un-ticked forgets its rewatches.
-    const keptRewatches = addCountedRewatches(
-      cleanRewatches(existing?.rewatches || {}, merged.watched),
-      merged.watched, merged.dates, body.rewatchCounts || [],
+    const keptRewatches = addDatedRewatches(
+      addCountedRewatches(
+        cleanRewatches(existing?.rewatches || {}, merged.watched),
+        merged.watched, merged.dates, body.rewatchCounts || [],
+      ),
+      merged.watched, body.rewatchDates || [],
     );
 
     const { rows } = await db.query(
