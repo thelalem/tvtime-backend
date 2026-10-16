@@ -14,7 +14,7 @@ const CATCH_UP_MS = 24 * 60 * 60 * 1000;
 // Local hours [SILENT_FROM, 24) and [0, SILENT_UNTIL) are delivered without sound.
 const SILENT_FROM = 23;
 const SILENT_UNTIL = 7;
-const POSTER_BASE = 'https://image.tmdb.org/t/p/w342';
+const POSTER_BASE = 'https://image.tmdb.org/t/p/w185';
 const SWEEP_INTERVAL_MS = 15 * 60 * 1000;
 
 const INVALID_TOKEN_CODES = new Set([
@@ -38,17 +38,25 @@ function episodeLabel(season, episode) {
 
 // The real sender. Loaded lazily so tests (and a server without Firebase set up) never touch it.
 // Resolves to the tokens FCM says are dead, which the caller deletes.
-async function sendThroughFcm(tokens, { title, body, data, tag, silent, imageUrl }) {
+async function sendThroughFcm(tokens, { title, body, data, tag, silent, imageUrl, posterPath, backdropPath }) {
   const { admin } = require('./firebase');
   const result = await admin.messaging().sendEachForMulticast({
     tokens,
-    // imageUrl: Android draws it in the expanded notification and as a thumbnail when collapsed.
-    notification: { title, body, ...(imageUrl ? { imageUrl } : {}) },
-    data,
-    android: {
-      priority: 'high',
-      notification: { channelId: silent ? 'new_episodes_silent' : 'new_episodes', tag },
+    // Data only: the app draws the notification itself (EpisodeMessagingService.kt), so the poster
+    // is a small image and the notification does not expand. A push Firebase draws with an image
+    // is always the expandable big-picture kind.
+    data: {
+      ...data,
+      title,
+      body,
+      tag,
+      silent: silent ? '1' : '0',
+      ...(imageUrl ? { imageUrl } : {}),
+      // So the show page can draw its header at once, before its own details have loaded.
+      ...(posterPath ? { posterPath } : {}),
+      ...(backdropPath ? { backdropPath } : {}),
     },
+    android: { priority: 'high' },
   });
   const dead = [];
   let delivered = 0;
@@ -135,6 +143,8 @@ async function notifyUser(db, user, { getUpcoming, send, now }) {
         data: { type: 'new_episode', seriesId: String(seriesId), season: String(season), episode: String(episode) },
         tag: `episode-${seriesId}-${season}-${episode}`,
         silent,
+        posterPath: item.posterPath || undefined,
+        backdropPath: item.series?.backdropPath || undefined,
         imageUrl: item.posterPath ? `${POSTER_BASE}${item.posterPath}` : undefined,
       });
       if (dead?.length) await db.query('DELETE FROM device_tokens WHERE token = ANY($1)', [dead]);
