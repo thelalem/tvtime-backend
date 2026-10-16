@@ -1,0 +1,243 @@
+// New-episode push notifications (FEATURE_PLAN.md section 7).
+//
+// The app uploads its FCM token (PUT /me/devices). A sweep every few minutes looks at each user
+// who has a token and notifications on, and for every episode of a show they follow that airs on
+// their local date, once their local morning has started, sends one push through Firebase Cloud
+// Messaging. `notifications_sent` makes each (user, episode) go out at most once.
+const { pool } = require('./db');
+const { isValidTimeZone, localDateString } = require('./local-date');
+
+// Local hour at which the day's episodes are announced. Air dates carry no time, so this is
+// "the morning of the day it airs" rather than the minute it airs.
+const NOTIFY_HOUR = 9;
+const SWEEP_INTERVAL_MS = 15 * 60 * 1000;
+
+const INVALID_TOKEN_CODES = new Set([
+  'messaging/registration-token-not-registered',
+  'messaging/invalid-registration-token',
+  'messaging/invalid-argument',
+]);
+
+function localHour(timeZone, now) {
+  const zone = isValidTimeZone(timeZone) ? timeZone : 'UTC';
+  const hour = new Intl.DateTimeFormat('en-GB', { timeZone: zone, hour: '2-digit', hour12: false })
+    .formatToParts(now).find((part) => part.type === 'hour').value;
+  return Number(hour) % 24;
+}
+
+function episodeLabel(season, episode) {
+  const two = (n) => String(n).padStart(2, '0');
+  return `S${two(season)} | E${two(episode)}`;
+}
+
+// The real sender. Loaded lazily so tests (and a server without Firebase set up) never touch it.
+// Resolves to the tokens FCM says are dead, which the caller deletes.
+async function sendThroughFcm(tokens, { title, body, data, tag }) {
+  const { admin } = require('./firebase');
+  const result = await admin.messaging().sendEachForMulticast({
+    tokens,
+    notification: { title, body },
+    data,
+    android: {
+      priority: 'high',
+      notification: { channelId: 'new_episodes', tag },
+    },
+  });
+  const dead = [];
+  let delivered = 0;
+  result.responses.forEach((item, index) => {
+    if (item.success) { delivered += 1; return; }
+    if (INVALID_TOKEN_CODES.has(item.error?.code)) dead.push(tokens[index]);
+  });
+  // Nothing delivered and nothing proven dead: a transient failure, so let the caller retry later.
+  if (!delivered && !dead.length) {
+    throw new Error(result.responses.find((item) => item.error)?.error?.message || 'FCM send failed');
+  }
+  return dead;
+}
+
+// One pass over every user. `getUpcoming`, `send` and `now` are parameters so tests can drive it.
+async function runNotificationSweep({
+  db = pool,
+  getUpcoming = (args) => require('./upcoming').getUpcomingEpisodes(args),
+  send = sendThroughFcm,
+  now = new Date(),
+} = {}) {
+  const { rows: users } = await db.query(
+    `SELECT u.firebase_uid AS uid, u.timezone FROM app_users u
+     WHERE u.notifications_enabled
+       AND EXISTS (SELECT 1 FROM device_tokens d WHERE d.firebase_uid = u.firebase_uid)`,
+  );
+  let sent = 0;
+  for (const user of users) {
+    if (localHour(user.timezone, now) < NOTIFY_HOUR) continue;
+    try {
+      sent += await notifyUser(db, user, { getUpcoming, send, now });
+    } catch (error) {
+      console.error(`[notifications] ${user.uid}: ${error.message}`);
+    }
+  }
+  return sent;
+}
+
+async function notifyUser(db, user, { getUpcoming, send, now }) {
+  const today = localDateString(user.timezone, now);
+  const upcoming = await getUpcoming({ uid: user.uid, today, pool: db });
+  const airing = upcoming.filter((item) => item.episode?.airDate === today);
+  if (!airing.length) return 0;
+
+  const [muted, progress, tokens] = await Promise.all([
+    db.query('SELECT series_id FROM muted_shows WHERE firebase_uid=$1', [user.uid]),
+    db.query('SELECT series_id, watched_episodes FROM show_progress WHERE firebase_uid=$1', [user.uid]),
+    db.query('SELECT token FROM device_tokens WHERE firebase_uid=$1', [user.uid]),
+  ]);
+  const mutedIds = new Set(muted.rows.map((row) => Number(row.series_id)));
+  const watched = new Map(progress.rows.map((row) => [
+    Number(row.series_id),
+    new Set(Array.isArray(row.watched_episodes) ? row.watched_episodes.map(String) : []),
+  ]));
+  const deviceTokens = tokens.rows.map((row) => row.token);
+  if (!deviceTokens.length) return 0;
+
+  let count = 0;
+  for (const item of airing) {
+    const seriesId = Number(item.seriesId);
+    const season = Number(item.episode.seasonNumber);
+    const episode = Number(item.episode.episodeNumber);
+    if (mutedIds.has(seriesId) || !(season > 0) || !(episode > 0)) continue;
+    if (watched.get(seriesId)?.has(`S${season}E${episode}`)) continue;
+
+    // Claim first, so two overlapping sweeps cannot both send it.
+    const claim = await db.query(
+      `INSERT INTO notifications_sent(firebase_uid, series_id, season, episode)
+       VALUES ($1,$2,$3,$4) ON CONFLICT DO NOTHING RETURNING 1`,
+      [user.uid, seriesId, season, episode],
+    );
+    if (!claim.rowCount) continue;
+
+    try {
+      const dead = await send(deviceTokens, {
+        title: item.seriesName,
+        body: episodeLabel(season, episode),
+        data: { type: 'new_episode', seriesId: String(seriesId), season: String(season), episode: String(episode) },
+        tag: `episode-${seriesId}-${season}-${episode}`,
+      });
+      if (dead?.length) await db.query('DELETE FROM device_tokens WHERE token = ANY($1)', [dead]);
+      count += 1;
+    } catch (error) {
+      // Release the claim so the next sweep tries again.
+      await db.query(
+        'DELETE FROM notifications_sent WHERE firebase_uid=$1 AND series_id=$2 AND season=$3 AND episode=$4',
+        [user.uid, seriesId, season, episode],
+      );
+      console.error(`[notifications] send failed for ${user.uid}: ${error.message}`);
+    }
+  }
+  return count;
+}
+
+let sweeping = false;
+function startNotificationSweeps() {
+  if (process.env.NOTIFICATIONS_DISABLED === '1') {
+    console.log('[notifications] disabled by NOTIFICATIONS_DISABLED=1');
+    return;
+  }
+  const tick = async () => {
+    if (sweeping) return;
+    sweeping = true;
+    try {
+      const sent = await runNotificationSweep();
+      if (sent) console.log(`[notifications] sent ${sent}`);
+    } catch (error) {
+      console.error(`[notifications] sweep failed: ${error.message}`);
+    } finally {
+      sweeping = false;
+    }
+  };
+  setTimeout(tick, 60 * 1000).unref();
+  setInterval(tick, SWEEP_INTERVAL_MS).unref();
+}
+
+function parseSeriesId(value) {
+  const id = Number.parseInt(value, 10);
+  return Number.isSafeInteger(id) && id > 0 ? id : null;
+}
+
+function registerNotificationRoutes(router) {
+  // The app uploads its FCM token on start, whenever FCM rotates it, and after the user allows
+  // notifications.
+  router.put('/me/devices', async (request, response, next) => {
+    const { token, platform } = request.body || {};
+    if (typeof token !== 'string' || token.length < 20 || token.length > 4096) {
+      return response.status(400).json({ error: 'invalid_token' });
+    }
+    const os = platform === 'ios' ? 'ios' : 'android';
+    try {
+      await pool.query(
+        `INSERT INTO device_tokens(token, firebase_uid, platform) VALUES ($1,$2,$3)
+         ON CONFLICT(token) DO UPDATE
+         SET firebase_uid=EXCLUDED.firebase_uid, platform=EXCLUDED.platform, updated_at=NOW()`,
+        [token, request.user.uid, os],
+      );
+      response.json({ ok: true });
+    } catch (error) { next(error); }
+  });
+
+  // Sign-out: this phone stops receiving this account's notifications.
+  router.delete('/me/devices', async (request, response, next) => {
+    const token = request.body?.token || request.query.token;
+    if (typeof token !== 'string' || !token) return response.status(400).json({ error: 'invalid_token' });
+    try {
+      await pool.query('DELETE FROM device_tokens WHERE token=$1 AND firebase_uid=$2', [token, request.user.uid]);
+      response.json({ ok: true });
+    } catch (error) { next(error); }
+  });
+
+  router.get('/me/notification-settings', async (request, response, next) => {
+    try {
+      const uid = request.user.uid;
+      const [user, muted] = await Promise.all([
+        pool.query('SELECT notifications_enabled AS enabled FROM app_users WHERE firebase_uid=$1', [uid]),
+        pool.query('SELECT series_id FROM muted_shows WHERE firebase_uid=$1 ORDER BY series_id', [uid]),
+      ]);
+      response.json({
+        enabled: user.rows[0]?.enabled ?? true,
+        mutedShows: muted.rows.map((row) => Number(row.series_id)),
+      });
+    } catch (error) { next(error); }
+  });
+
+  router.patch('/me/notification-settings', async (request, response, next) => {
+    const { enabled } = request.body || {};
+    if (typeof enabled !== 'boolean') return response.status(400).json({ error: 'invalid_enabled' });
+    try {
+      await pool.query('UPDATE app_users SET notifications_enabled=$2 WHERE firebase_uid=$1',
+        [request.user.uid, enabled]);
+      response.json({ enabled });
+    } catch (error) { next(error); }
+  });
+
+  router.put('/me/notification-settings/muted/:seriesId', async (request, response, next) => {
+    const seriesId = parseSeriesId(request.params.seriesId);
+    if (!seriesId) return response.status(400).json({ error: 'invalid_series_id' });
+    try {
+      await pool.query(
+        'INSERT INTO muted_shows(firebase_uid, series_id) VALUES ($1,$2) ON CONFLICT DO NOTHING',
+        [request.user.uid, seriesId],
+      );
+      response.json({ muted: true });
+    } catch (error) { next(error); }
+  });
+
+  router.delete('/me/notification-settings/muted/:seriesId', async (request, response, next) => {
+    const seriesId = parseSeriesId(request.params.seriesId);
+    if (!seriesId) return response.status(400).json({ error: 'invalid_series_id' });
+    try {
+      await pool.query('DELETE FROM muted_shows WHERE firebase_uid=$1 AND series_id=$2',
+        [request.user.uid, seriesId]);
+      response.json({ muted: false });
+    } catch (error) { next(error); }
+  });
+}
+
+module.exports = { registerNotificationRoutes, runNotificationSweep, startNotificationSweeps };

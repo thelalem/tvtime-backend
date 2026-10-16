@@ -66,6 +66,14 @@ The PostgreSQL tables are created on startup. User-data endpoints live under
   for you" in TMDB list shape (20 per page). Seeds come from favorites, the
   watchlist and watch progress; candidates are TMDB recommendations of those
   seeds, minus anything already tracked. New accounts get popular shows.
+- New-episode push notifications (`FEATURE_PLAN.md`, section 7; `src/notifications.js`). The app uploads its
+  FCM token with `PUT /api/v1/me/devices` (`{ token, platform }`) and removes it on sign-out with
+  `DELETE /me/devices` (`{ token }`). `GET`, `PATCH /me/notification-settings` (`{ enabled }`) and
+  `PUT`, `DELETE /me/notification-settings/muted/:seriesId` hold the master switch and per-show mutes.
+  A sweep every 15 minutes sends one push per episode airing on the user's local date once their local
+  time is 09:00 or later (title = show name, body = `S03 | E01`, data = `seriesId`, `season`, `episode`);
+  `notifications_sent` keeps it to once per episode. Uses the same Firebase service account as sign-in.
+  Set `NOTIFICATIONS_DISABLED=1` to turn the sweep off.
 - Movies (see `FEATURE_PLAN.md`, section 4). A watched movie is always on the movie watchlist; `watchedOn`
   (`YYYY-MM-DD` or `null`) says whether and when it was watched. The server fetches the movie from TMDB,
   so a client sends no movie body:

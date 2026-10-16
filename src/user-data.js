@@ -5,6 +5,7 @@ const { getTvSeason, getTvShowClassificationData, withImdbRatings } = require('.
 const { getUpcomingEpisodes } = require('./upcoming');
 const { getRecommendations, invalidateRecommendations } = require('./recommendations');
 const { registerMeMovieRoutes } = require('./me-movies');
+const { registerNotificationRoutes } = require('./notifications');
 const { clearShowState, loadShowStates, registerShowStateRoutes } = require('./show-states');
 const { hasAired, isValidTimeZone, localDateString } = require('./local-date');
 const { EPISODE_KEY, markEpisodes, mergeImportedActions, toMs } = require('./episode-merge');
@@ -56,6 +57,7 @@ router.use(async (request, response, next) => {
 // paths with a 404.
 registerMeMovieRoutes(router);
 registerShowStateRoutes(router);
+registerNotificationRoutes(router);
 
 router.get('/me', async (request, response, next) => {
   try {

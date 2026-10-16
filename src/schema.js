@@ -118,6 +118,36 @@ async function initializeDatabase() {
       PRIMARY KEY (firebase_uid, movie_id)
     );
 
+    -- New-episode push notifications (see notifications.js). One row per app install that
+    -- allowed notifications; the FCM token is the key, and signing in as someone else on the
+    -- same phone simply moves the row to the new user.
+    CREATE TABLE IF NOT EXISTS device_tokens (
+      token TEXT PRIMARY KEY,
+      firebase_uid TEXT NOT NULL REFERENCES app_users(firebase_uid) ON DELETE CASCADE,
+      platform TEXT NOT NULL DEFAULT 'android',
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS device_tokens_uid_idx ON device_tokens(firebase_uid);
+
+    ALTER TABLE app_users
+      ADD COLUMN IF NOT EXISTS notifications_enabled BOOLEAN NOT NULL DEFAULT TRUE;
+
+    CREATE TABLE IF NOT EXISTS muted_shows (
+      firebase_uid TEXT NOT NULL REFERENCES app_users(firebase_uid) ON DELETE CASCADE,
+      series_id BIGINT NOT NULL,
+      PRIMARY KEY (firebase_uid, series_id)
+    );
+
+    -- Which episode notifications went out, so a restart or a second sweep never repeats one.
+    CREATE TABLE IF NOT EXISTS notifications_sent (
+      firebase_uid TEXT NOT NULL REFERENCES app_users(firebase_uid) ON DELETE CASCADE,
+      series_id BIGINT NOT NULL,
+      season INTEGER NOT NULL,
+      episode INTEGER NOT NULL,
+      sent_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      PRIMARY KEY (firebase_uid, series_id, season, episode)
+    );
+
     -- Slow-changing provider answers (see persistent-cache.js), so they survive
     -- a restart. Keyed by what was asked, e.g. 'omdb:season:tt0386676:3'.
     CREATE TABLE IF NOT EXISTS provider_cache (

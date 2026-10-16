@@ -20,6 +20,7 @@ const {
 } = require('./tmdb');
 const { getSimilarShows } = require('./similar');
 const { registerPublicMovieRoutes } = require('./movies');
+const { startNotificationSweeps } = require('./notifications');
 
 const app = express();
 app.use(cors({
@@ -180,6 +181,7 @@ async function start() {
     });
   }, 6 * 60 * 60 * 1000);
   classificationTimer.unref();
+  startNotificationSweeps();
   server = app.listen(config.port, '0.0.0.0', () => {
     console.log(`TV Time API listening on 0.0.0.0:${config.port}`);
   });
