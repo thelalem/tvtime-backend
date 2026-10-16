@@ -17,9 +17,22 @@ test('which is 07:00 UTC in summer time and 08:00 in winter', () => {
   assert.equal(zonedDateTimeToUtc('2026-12-04', airTime, timezone).toISOString(), '2026-12-04T08:00:00.000Z');
 });
 
+test('Netflix, Hulu and Peacock release at 03:00 New York time too', () => {
+  for (const name of ['Netflix', 'Hulu', 'Peacock']) {
+    assert.deepEqual(streamingReleaseTime({ ...tulsaKing, webChannel: { name } }),
+      { airTime: '03:00', timezone: 'America/New_York' }, name);
+  }
+});
+
+test('Disney+ releases at 21:00 New York time, 01:00 UTC the next day in summer', () => {
+  const { airTime, timezone } = streamingReleaseTime({ ...tulsaKing, webChannel: { name: 'Disney+' } });
+  assert.equal(zonedDateTimeToUtc('2026-10-13', airTime, timezone).toISOString(), '2026-10-14T01:00:00.000Z');
+  assert.equal(zonedDateTimeToUtc('2026-12-08', airTime, timezone).toISOString(), '2026-12-09T02:00:00.000Z');
+});
+
 test('a published time, a TV network or another service is left alone', () => {
   assert.equal(streamingReleaseTime({ ...tulsaKing, schedule: { time: '21:00' } }), null);
   assert.equal(streamingReleaseTime({ ...tulsaKing, network: { name: 'CBS' } }), null);
-  assert.equal(streamingReleaseTime({ ...tulsaKing, webChannel: { name: 'Netflix' } }), null);
+  assert.equal(streamingReleaseTime({ ...tulsaKing, webChannel: { name: 'Apple TV' } }), null);
   assert.equal(streamingReleaseTime(null), null);
 });

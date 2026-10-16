@@ -32,13 +32,20 @@ const showConcurrency = 8;
 // it abandoned still settles into the provider cache, so the next read has it.
 const tvMazeEnrichmentTimeoutMs = 5000;
 
-// TVMaze gives streaming shows no air time. These services release new episodes
+// TVMaze gives streaming shows no air time. Most services release new episodes
 // at midnight Pacific, 3 a.m. Eastern: 07:00 UTC in summer, 08:00 in winter, so
-// the time is kept in New York's zone rather than as a fixed UTC hour.
+// the time is kept in New York's zone rather than as a fixed UTC hour. Disney+
+// releases at 9 p.m. Eastern on the listed date. Apple TV is left out: it
+// releases the evening before the date TVMaze and TMDB list.
+const earlyMorning = { airTime: '03:00', timezone: 'America/New_York' };
 const streamingReleaseTimes = new Map([
-  ['paramount+', { airTime: '03:00', timezone: 'America/New_York' }],
-  ['prime video', { airTime: '03:00', timezone: 'America/New_York' }],
-  ['amazon prime video', { airTime: '03:00', timezone: 'America/New_York' }],
+  ['paramount+', earlyMorning],
+  ['prime video', earlyMorning],
+  ['amazon prime video', earlyMorning],
+  ['netflix', earlyMorning],
+  ['hulu', earlyMorning],
+  ['peacock', earlyMorning],
+  ['disney+', { airTime: '21:00', timezone: 'America/New_York' }],
 ]);
 
 /// The usual release time of a show TVMaze has no air time for, or null.
