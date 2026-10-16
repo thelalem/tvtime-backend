@@ -33,7 +33,8 @@ const UNANSWERED_FALLBACK_HOUR = 21;
 function announceAt(item, userTimeZone) {
   const airDate = item.episode?.airDate;
   const fallbackHour = item.tvMazeAnswered === false ? UNANSWERED_FALLBACK_HOUR : FALLBACK_HOUR;
-  return zonedDateTimeToUtc(airDate, item.airTime, item.timezone)
+  // The air time falls on releaseDate, the evening before the air date for Apple TV.
+  return zonedDateTimeToUtc(item.releaseDate || airDate, item.airTime, item.timezone)
     || zonedDateTimeToUtc(airDate, `${fallbackHour}:00`, userTimeZone || 'UTC');
 }
 

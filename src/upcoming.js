@@ -35,8 +35,9 @@ const tvMazeEnrichmentTimeoutMs = 5000;
 // TVMaze gives streaming shows no air time. Most services release new episodes
 // at midnight Pacific, 3 a.m. Eastern: 07:00 UTC in summer, 08:00 in winter, so
 // the time is kept in New York's zone rather than as a fixed UTC hour. Disney+
-// releases at 9 p.m. Eastern on the listed date. Apple TV is left out: it
-// releases the evening before the date TVMaze and TMDB list.
+// releases at 9 p.m. Eastern on the listed date. Apple TV releases at 9 p.m.
+// Eastern the evening before the date TVMaze and TMDB list (Severance 2x01:
+// listed Friday 17 January 2025, out Thursday the 16th), so its day moves back.
 const earlyMorning = { airTime: '03:00', timezone: 'America/New_York' };
 const streamingReleaseTimes = new Map([
   ['paramount+', earlyMorning],
@@ -46,6 +47,8 @@ const streamingReleaseTimes = new Map([
   ['hulu', earlyMorning],
   ['peacock', earlyMorning],
   ['disney+', { airTime: '21:00', timezone: 'America/New_York' }],
+  ['apple tv', { airTime: '21:00', timezone: 'America/New_York', dayOffset: -1 }],
+  ['apple tv+', { airTime: '21:00', timezone: 'America/New_York', dayOffset: -1 }],
 ]);
 
 /// The usual release time of a show TVMaze has no air time for, or null.
@@ -53,6 +56,13 @@ function streamingReleaseTime(tvMazeShow) {
   if (!tvMazeShow || tvMazeShow.schedule?.time || tvMazeShow.network) return null;
   const name = String(tvMazeShow.webChannel?.name || '').trim().toLowerCase();
   return streamingReleaseTimes.get(name) || null;
+}
+
+/// [date] (YYYY-MM-DD) moved by [days] calendar days.
+function addDays(date, days) {
+  if (!isDate(date) || !days) return date;
+  const moved = new Date(Date.parse(`${date}T00:00:00Z`) + days * 86400000);
+  return moved.toISOString().slice(0, 10);
 }
 
 /// Resolves to [fallback] if [promise] has not settled within [ms].
@@ -314,10 +324,11 @@ async function buildSeriesUpcoming(show, { data, episodes }, today, forceRefresh
     const matchingTvMaze = tvMazeEpisodes.find((candidate) =>
       Number(candidate.season) === Number(episode.season_number) &&
       Number(candidate.number) === Number(episode.episode_number));
+    const episodeData = episodeModel(episode, matchingTvMaze);
     result.push({
       seriesId: Number(show.id),
       series: seriesModel(data, show),
-      episode: episodeModel(episode, matchingTvMaze),
+      episode: episodeData,
       seriesName: data.name || show.name || 'TV show',
       posterPath: data.poster_path ?? show.posterPath ?? null,
       networkName: network?.name || null,
@@ -328,6 +339,9 @@ async function buildSeriesUpcoming(show, { data, episodes }, today, forceRefresh
       timezone: schedule.timezone || network?.country?.timezone || releaseTime?.timezone || null,
       // True when the time is the service's usual release time, not one TVMaze published.
       airTimeEstimated: releaseTime != null,
+      // The date in `timezone` that `airTime` falls on. Usually the air date; for Apple TV the
+      // evening before it. Older apps ignore it and use the air date.
+      releaseDate: addDays(episodeData.airDate, releaseTime?.dayOffset || 0),
       // False when TVMaze could not be asked: no air time means "unknown yet",
       // not "streaming, no time" (notifications.js, announceAt).
       tvMazeAnswered,

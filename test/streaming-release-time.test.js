@@ -30,9 +30,18 @@ test('Disney+ releases at 21:00 New York time, 01:00 UTC the next day in summer'
   assert.equal(zonedDateTimeToUtc('2026-12-08', airTime, timezone).toISOString(), '2026-12-09T02:00:00.000Z');
 });
 
+test('Apple TV releases at 21:00 New York time the evening before the listed date', () => {
+  for (const name of ['Apple TV', 'Apple TV+']) {
+    assert.deepEqual(streamingReleaseTime({ ...tulsaKing, webChannel: { name } }),
+      { airTime: '21:00', timezone: 'America/New_York', dayOffset: -1 }, name);
+  }
+  // Severance 2x01, listed Friday 17 January 2025, out Thursday the 16th at 21:00 EST.
+  assert.equal(zonedDateTimeToUtc('2025-01-16', '21:00', 'America/New_York').toISOString(), '2025-01-17T02:00:00.000Z');
+});
+
 test('a published time, a TV network or another service is left alone', () => {
   assert.equal(streamingReleaseTime({ ...tulsaKing, schedule: { time: '21:00' } }), null);
   assert.equal(streamingReleaseTime({ ...tulsaKing, network: { name: 'CBS' } }), null);
-  assert.equal(streamingReleaseTime({ ...tulsaKing, webChannel: { name: 'Apple TV' } }), null);
+  assert.equal(streamingReleaseTime({ ...tulsaKing, webChannel: { name: 'Crunchyroll' } }), null);
   assert.equal(streamingReleaseTime(null), null);
 });

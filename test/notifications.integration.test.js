@@ -224,6 +224,21 @@ test('sweep: a show with an air time and zone goes out at that moment, silently 
   assert.equal(calls[0].silent, true, '03:40 local is silent');
 });
 
+test('sweep: an Apple TV episode goes out the evening before its listed date (releaseDate)', async () => {
+  const uid = newUser();
+  await setup(uid); // Addis Ababa, UTC+3
+  const calls = [];
+  const send = async (tokens, message) => { calls.push(message); return []; };
+  // Listed 17 Oct, out 16 Oct 21:00 in New York: 01:00 UTC on the 17th, 04:00 in Addis Ababa.
+  const upcoming = [{
+    ...item(510, 'Apple Show', 1, 2, '2026-10-17'),
+    airTime: '21:00', timezone: 'America/New_York', releaseDate: '2026-10-16',
+  }];
+
+  assert.equal(await sweep(uid, upcoming, send, new Date('2026-10-17T00:50:00Z')), 0, 'not yet');
+  assert.equal(await sweep(uid, upcoming, send, new Date('2026-10-17T01:10:00Z')), 1);
+});
+
 test('sweep: daytime pushes make sound; an episode older than a day is not announced', async () => {
   const uid = newUser();
   await setup(uid);
