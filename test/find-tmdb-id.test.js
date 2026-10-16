@@ -30,13 +30,19 @@ undici.fetch = async (url) => {
     ok: true,
     status: 200,
     headers: { get: () => null },
-    json: async () => ({
+    json: async () => href.pathname.endsWith('/search/movie') ? ({
+      results: [
+        { id: 1, title: 'My Oxford Year Two', release_date: '2025-01-01' },
+        { id: 1307078, title: 'My Oxford Year', release_date: '2025-07-31' },
+        { id: 3, title: 'My Oxford Year', release_date: '1990-01-01' },
+      ],
+    }) : ({
       tv_results: known ? [{ id: 1396 }] : [],
       movie_results: known ? [{ id: 331 }] : [],
     }),
   };
 };
-const { findTmdbId } = require('../src/tmdb');
+const { findMovieByTitle, findTmdbId } = require('../src/tmdb');
 
 test('finds a show by TVDB id and a movie by IMDb id, asking TMDB once each', async () => {
   assert.equal(await findTmdbId('tv', '81189'), 1396);
@@ -50,4 +56,12 @@ test('an id TMDB does not know is null, and remembered', async () => {
   assert.equal(await findTmdbId('tv', '5'), null);
   assert.equal(await findTmdbId('tv', '5'), null);
   assert.equal(requested.length, 1);
+});
+
+test('a movie is found by exact title and release year, never by a lookalike', async () => {
+  assert.equal(await findMovieByTitle('my oxford year!', 2025), 1307078);
+  assert.equal(await findMovieByTitle('My Oxford Year', 2024), 1307078, 'a year either side is allowed');
+  assert.equal(await findMovieByTitle('My Oxford Year', 2010), null);
+  assert.equal(await findMovieByTitle('Oxford', 2025), null);
+  assert.equal(await findMovieByTitle('', 2025), null);
 });

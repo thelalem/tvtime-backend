@@ -571,6 +571,34 @@ function findTmdbId(kind, externalId) {
   );
 }
 
+function plainTitle(text) {
+  return String(text || '').toLowerCase().normalize('NFKD').replace(/[^a-z0-9]+/g, '');
+}
+
+// The TMDB movie with exactly this title (ignoring case and punctuation) released in `year` (or a year
+// either side, for premieres that differ between countries), or null. For a movie the id lookup cannot
+// find: TV Time sometimes holds an IMDb id TMDB does not list for the film. A guess is worse than
+// nothing, so a title that only looks alike is not accepted. Cached in PostgreSQL.
+function findMovieByTitle(title, year) {
+  const wanted = plainTitle(title);
+  const wantedYear = Number(year);
+  if (!wanted || !Number.isInteger(wantedYear)) return Promise.resolve(null);
+  return readThrough(
+    `find:title-movie:${wanted}:${wantedYear}`,
+    imdbIdCacheTtlMs,
+    async () => {
+      const found = await tmdbGet('/search/movie', { query: String(title).slice(0, 200), year: wantedYear });
+      const match = ((found && found.results) || []).find((movie) => {
+        const released = Number.parseInt(String(movie.release_date || '').slice(0, 4), 10);
+        return [movie.title, movie.original_title].some((name) => plainTitle(name) === wanted) &&
+          Number.isInteger(released) && Math.abs(released - wantedYear) <= 1;
+      });
+      return match ? match.id : null;
+    },
+    { emptyTtlMs: emptyAnswerTtlMs },
+  );
+}
+
 async function getShowImdbRating(showId, knownImdbId, kind = 'tv', { forList = false } = {}) {
   if (!config.omdbApiKey) return null;
   // A TMDB movie id and a show id are different things that can be the same number, so the
@@ -759,6 +787,7 @@ module.exports = {
   getImdbId,
   getImdbRatings,
   findTmdbId,
+  findMovieByTitle,
   getCollection,
   getMovie,
   getMovieRecommendations,

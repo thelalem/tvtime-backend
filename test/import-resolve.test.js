@@ -5,6 +5,10 @@ const Module = require('node:module');
 const lookups = [];
 let failFor = null;
 const stub = {
+  findMovieByTitle: async (title, year) => {
+    lookups.push(`title:${title}:${year}`);
+    return title === 'My Oxford Year' ? 1307078 : null;
+  },
   findTmdbId: async (kind, id) => {
     lookups.push(`${kind}:${id}`);
     if (id === failFor) throw new Error('TMDB down');
@@ -67,7 +71,22 @@ test('bad input is refused', async () => {
   assert.equal(lookups.length, 0);
 });
 
+test('movies the id lookup cannot find are matched by title and year', async () => {
+  const { status, payload } = await call({
+    search: [{ key: 'tt32641187', title: 'My Oxford Year', year: 2025 }, { key: 'tt1', title: 'Nope', year: 2000 }],
+  });
+  assert.equal(status, 200);
+  assert.deepEqual(payload.search, { tt32641187: 1307078, tt1: null });
+});
+
+test('bad search items are refused', async () => {
+  for (const search of [{}, [{ key: 'a', title: '', year: 2000 }], [{ key: 'a', title: 'x', year: 'y' }],
+    Array.from({ length: 51 }, (_, i) => ({ key: `k${i}`, title: 't', year: 2000 }))]) {
+    assert.equal((await call({ search })).status, 400);
+  }
+});
+
 test('an empty request answers empty maps', async () => {
   const { payload } = await call({});
-  assert.deepEqual(payload, { tvdb: {}, imdb: {}, failed: [] });
+  assert.deepEqual(payload, { tvdb: {}, imdb: {}, search: {}, failed: [] });
 });
