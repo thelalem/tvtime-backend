@@ -320,17 +320,17 @@ test('one user\'s memory never leaks into another\'s', async () => {
   assert.deepEqual(watchedKeys(other.body), ['S1E1'], 'B has no unwatch for S1E1');
 });
 
-test('the old whole-row PUT still works and is unaffected by remembered unwatches', async () => {
+test('there is no whole-row PUT: progress changes only through ticks and imports', async () => {
   const uid = newUser();
-  await importShow(uid, [act('S1E1', true, '2026-06-30T16:18:00Z'), act('S1E1', false, '2026-08-01T00:00:00Z'), act('S1E2', true, '2026-06-30T16:18:00Z')]);
-  const put = await api(uid, 'PUT', `/me/progress/${SHOW}`, {
-    currentSeason: 1, currentEpisode: 2, watchedEpisodes: ['S1E2', 'S1E3'],
-    watchedEpisodeDates: { S1E2: '2026-06-30T16:18:00.000Z', S1E3: '2026-09-01T00:00:00.000Z' },
-    watchedCount: 2, totalEpisodes: 5, lastWatched: '2026-09-01T00:00:00.000Z',
+  await importShow(uid, [act('S1E1', true, '2026-06-30T16:18:00Z')]);
+  const put = await fetch(`${base}/api/v1/me/progress/${SHOW}`, {
+    method: 'PUT',
+    headers: { authorization: `Bearer ${uid}`, 'content-type': 'application/json' },
+    body: JSON.stringify({ currentSeason: 1, currentEpisode: 2, watchedEpisodes: ['S1E2'], watchedEpisodeDates: {} }),
   });
-  assert.equal(put.status, 200);
-  assert.deepEqual(watchedKeys(put.body), ['S1E2', 'S1E3']);
-  assert.equal((await unwatchedRows(uid)).length, 1, 'PUT leaves the memory alone');
+  assert.equal(put.status, 404);
+  const kept = await api(uid, 'GET', `/me/progress/${SHOW}`);
+  assert.deepEqual(watchedKeys(kept.body), ['S1E1'], 'untouched');
 });
 
 test('whether an episode has aired follows each user calendar date, and that date is stored with the result', async () => {

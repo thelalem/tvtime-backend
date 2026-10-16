@@ -708,54 +708,9 @@ router.post('/me/progress/:seriesId/import', async (request, response, next) => 
   }
 });
 
-router.put('/me/progress/:seriesId', async (request, response, next) => {
-  const seriesId = Number.parseInt(request.params.seriesId, 10);
-  const body = request.body || {};
-  if (!Number.isSafeInteger(seriesId) || seriesId <= 0 ||
-      !Number.isInteger(body.currentSeason) || !Number.isInteger(body.currentEpisode) ||
-      !Array.isArray(body.watchedEpisodes) || !body.watchedEpisodeDates ||
-      typeof body.watchedEpisodeDates !== 'object' ||
-      !isOptionalCount(body.watchedCount) || !isOptionalCount(body.totalEpisodes) ||
-      !isOptionalDate(body.lastWatched)) {
-    return response.status(400).json({ error: 'invalid_progress' });
-  }
-  try {
-    const { rows } = await pool.query(
-      `INSERT INTO show_progress(firebase_uid,series_id,current_season,current_episode,
-        watched_episodes,watched_episode_dates,watched_count,total_episodes,last_watched,
-         show_name,poster_path,backdrop_path,classification,classification_checked_at,
-         released_episode_count,is_ended)
-        VALUES ($1,$2,$3,$4,$5::jsonb,$6::jsonb,$7,$8,$9,$10,$11,$12,
-         NULL,NULL,0,FALSE)
-        ON CONFLICT(firebase_uid,series_id) DO UPDATE SET
-        current_season=EXCLUDED.current_season,current_episode=EXCLUDED.current_episode,
-        watched_episodes=EXCLUDED.watched_episodes,
-        watched_episode_dates=EXCLUDED.watched_episode_dates,
-        watched_count=EXCLUDED.watched_count,total_episodes=EXCLUDED.total_episodes,
-        last_watched=CASE WHEN jsonb_array_length(EXCLUDED.watched_episodes) = 0
-          THEN NULL ELSE EXCLUDED.last_watched END,
-        show_name=COALESCE(EXCLUDED.show_name,show_progress.show_name),
-        poster_path=COALESCE(EXCLUDED.poster_path,show_progress.poster_path),
-        backdrop_path=COALESCE(EXCLUDED.backdrop_path,show_progress.backdrop_path),
-        classification=NULL,classification_checked_at=NULL,
-        released_episode_count=0,is_ended=FALSE,updated_at=NOW()
-       RETURNING series_id AS "seriesId",current_season AS "currentSeason",
-        current_episode AS "currentEpisode",watched_episodes AS "watchedEpisodes",
-        watched_episode_dates AS "watchedEpisodeDates",watched_count AS "watchedCount",
-        total_episodes AS "totalEpisodes",last_watched AS "lastWatched",
-        show_name AS "showName",poster_path AS "posterPath",backdrop_path AS "backdropPath",
-        classification,classification_checked_at AS "classificationCheckedAt",
-        released_episode_count AS "releasedEpisodeCount",is_ended AS "isEnded"`,
-      [request.user.uid, seriesId, body.currentSeason, body.currentEpisode,
-       JSON.stringify(body.watchedEpisodes), JSON.stringify(body.watchedEpisodeDates),
-       Number(body.watchedCount ?? body.watchedEpisodes.length), Number(body.totalEpisodes ?? 0),
-       body.lastWatched ?? null, body.showName ?? null, body.posterPath ?? null,
-       body.backdropPath ?? null],
-    );
-    response.json(rows[0]);
-    scheduleClassificationRefresh(request.user.uid, rows[0].seriesId);
-  } catch (error) { next(error); }
-});
+// No whole-row PUT: it stored any watched list and dates it was sent, without
+// the key checks or the per-show lock the tick and import routes use, and no
+// part of the app called it any more.
 
 router.delete('/me/progress/:seriesId', async (request, response, next) => {
   const seriesId = Number.parseInt(request.params.seriesId, 10);

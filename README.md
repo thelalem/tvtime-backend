@@ -120,7 +120,7 @@ The PostgreSQL tables are created on startup. User-data endpoints live under
   `PUT /me/watchlist/:showId` clears either state too.
 - `GET /api/v1/me/show-states` returns `{ stopped: [ids], removed: [ids] }`.
 - `GET /api/v1/me/favorites` and `PUT`, `DELETE /api/v1/me/favorites/:showId`
-- `GET /api/v1/me/progress` and `PUT`, `DELETE /api/v1/me/progress/:showId`
+- `GET /api/v1/me/progress` and `GET`, `DELETE /api/v1/me/progress/:showId` (progress changes through the episodes PATCH and the import POST)
 - `GET /api/v1/me/progress/:showId` returns one show's progress (404 if none).
 - `PATCH /api/v1/me/progress/:showId/episodes` with
   `{ episodeKeys: ["S1E2"], watched: true, currentSeason, currentEpisode,
