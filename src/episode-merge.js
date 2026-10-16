@@ -67,14 +67,16 @@ function mergeImportedActions({ watched, dates, unwatched }, actions) {
 // information, so there is no comparison; what is kept is the existing behavior
 // that marking an already-watched episode leaves its original date alone, plus
 // the new memory of an unmark so an older import cannot bring it back.
-function markEpisodes({ watched, dates, unwatched }, keys, isWatched, nowIso) {
+// [overwriteDate]: the user named a day, so an episode that is already watched takes that day too
+// (otherwise its existing date is left alone).
+function markEpisodes({ watched, dates, unwatched }, keys, isWatched, nowIso, { overwriteDate = false } = {}) {
   const nextWatched = new Set(watched);
   const nextDates = { ...dates };
   const nextUnwatched = { ...unwatched };
 
   for (const key of keys) {
     if (isWatched) {
-      if (!nextWatched.has(key)) {
+      if (!nextWatched.has(key) || overwriteDate) {
         nextWatched.add(key);
         nextDates[key] = nowIso;
       }

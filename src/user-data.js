@@ -543,6 +543,7 @@ router.patch('/me/progress/:seriesId/episodes', async (request, response, next) 
       keys,
       body.watched,
       stamp.toISOString(),
+      { overwriteDate: body.watchedAt != null },
     );
     const episodes = marked.watched;
     const dates = marked.dates;

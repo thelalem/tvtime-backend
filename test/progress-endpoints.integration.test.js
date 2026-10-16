@@ -442,3 +442,15 @@ test('a chosen day must be a real date, not in the future, and only for marking 
   assert.equal((await patch({ watched: true, watchedAt: '2999-01-01T00:00:00Z' })).status, 400);
   assert.equal((await patch({ watched: false, watchedAt: '2026-03-04T12:00:00Z' })).status, 400);
 });
+
+test('choosing a day for an episode that is already watched changes its date', async () => {
+  const uid = newUser();
+  await api(uid, 'PATCH', `/me/progress/${SHOW}/episodes`, { episodeKeys: ['S1E1'], watched: true, currentSeason: 1, currentEpisode: 1 });
+  const changed = await api(uid, 'PATCH', `/me/progress/${SHOW}/episodes`, {
+    episodeKeys: ['S1E1'], watched: true, currentSeason: 1, currentEpisode: 1, watchedAt: '2026-01-02T12:00:00.000Z',
+  });
+  assert.equal(new Date(changed.body.watchedEpisodeDates.S1E1).toISOString(), '2026-01-02T12:00:00.000Z');
+  // Marking again without a day leaves that day alone.
+  const again = await api(uid, 'PATCH', `/me/progress/${SHOW}/episodes`, { episodeKeys: ['S1E1'], watched: true, currentSeason: 1, currentEpisode: 1 });
+  assert.equal(new Date(again.body.watchedEpisodeDates.S1E1).toISOString(), '2026-01-02T12:00:00.000Z');
+});
