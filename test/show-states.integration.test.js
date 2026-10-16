@@ -267,3 +267,18 @@ test('a poll the client already has is answered 304 with no body; a change is se
   assert.equal(changed.status, 200);
   assert.equal((await changed.json()).length, 2);
 });
+
+test('the compact watchlist view carries no episode lists and no All Shows', async () => {
+  const uid = newUser();
+  await add(uid, 85, 'Eighty-five');
+  await watch(uid, 85, 'Eighty-five');
+  const full = (await api(uid, 'GET', '/me/watchlist-view')).body;
+  const compact = (await api(uid, 'GET', '/me/watchlist-view?compact=1')).body;
+  assert.ok(full.allShows && full.progress[0].watchedEpisodes, 'the full answer is unchanged');
+  assert.equal(compact.allShows, undefined);
+  assert.deepEqual(watchlistIds(compact), [85]);
+  const row = compact.progress.find((p) => Number(p.seriesId) === 85);
+  assert.equal(row.watchedEpisodes, undefined);
+  assert.equal(row.watchedEpisodeDates, undefined);
+  assert.equal(row.watchedCount, 1, 'the summary fields stay');
+});

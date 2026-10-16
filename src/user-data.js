@@ -277,6 +277,18 @@ router.get('/me/watchlist-view', async (request, response, next) => {
         },
       });
     }
+    // `?compact=1`, for the home-screen widget's hourly refresh: no episode
+    // lists and no `allShows`. The full answer repeats every watched episode
+    // with its date twice; the widget only reads each show's next episode and
+    // unwatched count. Older apps do not ask for it and get the full answer.
+    if (request.query.compact === '1') {
+      return response.json({
+        watchlist: watchlistResult.rows.map((row) => ({ ...row.data, addedAt: row.addedAt })),
+        progress: [...progressById.values()].map(
+          ({ watchedEpisodes: _episodes, watchedEpisodeDates: _dates, ...summary }) => summary,
+        ),
+      });
+    }
     response.json({
       watchlist: watchlistResult.rows.map((row) => ({
         ...row.data,
