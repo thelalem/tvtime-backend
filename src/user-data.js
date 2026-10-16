@@ -505,6 +505,18 @@ router.patch('/me/progress/:seriesId/episodes', async (request, response, next) 
     return response.status(400).json({ error: 'invalid_episodes' });
   }
   const optionalString = (value) => (typeof value === 'string' ? value : null);
+  // Optional: the day the user says they watched these (the episode page's "choose the date").
+  // Only for marking watched, and never later than tomorrow (a day of slack for time zones).
+  const now = new Date();
+  let stamp = now;
+  if (body.watchedAt !== undefined && body.watchedAt !== null) {
+    const chosen = new Date(body.watchedAt);
+    if (body.watched !== true || Number.isNaN(chosen.getTime()) ||
+        chosen.getTime() > now.getTime() + 24 * 60 * 60 * 1000) {
+      return response.status(400).json({ error: 'invalid_watched_at' });
+    }
+    stamp = chosen;
+  }
   const db = await pool.connect().catch((error) => { next(error); return null; });
   if (!db) return;
   try {
@@ -518,7 +530,6 @@ router.patch('/me/progress/:seriesId/episodes', async (request, response, next) 
     );
     const existing = existingRows[0];
     const unwatchedBefore = await loadUnwatched(db, request.user.uid, seriesId);
-    const now = new Date();
     // Marking and unmarking in the app is the newest information there is, so
     // it is applied without comparison. An unmark is also remembered, so an
     // older import cannot bring the episode back.
@@ -531,12 +542,17 @@ router.patch('/me/progress/:seriesId/episodes', async (request, response, next) 
       },
       keys,
       body.watched,
-      now.toISOString(),
+      stamp.toISOString(),
     );
     const episodes = marked.watched;
     const dates = marked.dates;
+    // A past date the user picked must not make the show look "watched most recently".
+    const previousLast = existing?.last_watched ? new Date(existing.last_watched) : null;
     const lastWatched = episodes.size === 0
-      ? null : body.watched ? now : (existing?.last_watched ?? null);
+      ? null
+      : body.watched
+        ? (previousLast && previousLast > stamp ? previousLast : stamp)
+        : (existing?.last_watched ?? null);
     const totalEpisodes = Number.isInteger(body.totalEpisodes) && body.totalEpisodes >= 0
       ? body.totalEpisodes : (existing?.total_episodes ?? 0);
 

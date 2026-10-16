@@ -411,3 +411,34 @@ test('classification records the next unwatched aired episode and how many are u
   assert.equal(caughtUp.nextEpisode, null);
   assert.equal(caughtUp.unwatchedCount, 0);
 });
+
+test('an episode can be marked watched on a chosen day', async () => {
+  const uid = newUser();
+  const day = '2026-03-04T12:00:00.000Z';
+  const res = await api(uid, 'PATCH', `/me/progress/${SHOW}/episodes`, {
+    episodeKeys: ['S1E1'], watched: true, currentSeason: 1, currentEpisode: 1, watchedAt: day,
+  });
+  assert.equal(res.status, 200);
+  assert.equal(new Date(res.body.watchedEpisodeDates.S1E1).toISOString(), day);
+  assert.equal(new Date(res.body.lastWatched).toISOString(), day);
+
+  // A later tap without a date uses now, and an earlier chosen day does not make it look older.
+  await api(uid, 'PATCH', `/me/progress/${SHOW}/episodes`, {
+    episodeKeys: ['S1E2'], watched: true, currentSeason: 1, currentEpisode: 2,
+  });
+  const older = await api(uid, 'PATCH', `/me/progress/${SHOW}/episodes`, {
+    episodeKeys: ['S1E3'], watched: true, currentSeason: 1, currentEpisode: 3, watchedAt: '2020-01-01T12:00:00.000Z',
+  });
+  assert.equal(new Date(older.body.watchedEpisodeDates.S1E3).toISOString(), '2020-01-01T12:00:00.000Z');
+  assert.ok(new Date(older.body.lastWatched) > new Date(day), 'last watched stays the newest');
+});
+
+test('a chosen day must be a real date, not in the future, and only for marking watched', async () => {
+  const uid = newUser();
+  const patch = (extra) => api(uid, 'PATCH', `/me/progress/${SHOW}/episodes`, {
+    episodeKeys: ['S1E1'], currentSeason: 1, currentEpisode: 1, ...extra,
+  });
+  assert.equal((await patch({ watched: true, watchedAt: 'not a date' })).status, 400);
+  assert.equal((await patch({ watched: true, watchedAt: '2999-01-01T00:00:00Z' })).status, 400);
+  assert.equal((await patch({ watched: false, watchedAt: '2026-03-04T12:00:00Z' })).status, 400);
+});

@@ -84,6 +84,10 @@ The PostgreSQL tables are created on startup. User-data endpoints live under
   returns `{ ratings: { "S1E2": 4 } }` (1 to 5); `PUT /me/shows/:showId/episodes/:season/:episode/rating` with
   `{ rating }` sets one (400 `invalid_rating` outside 1-5); `DELETE` on the same path clears it. The row is the
   per-episode home for the later answers (feeling, favorite cast member, device) too.
+- `PATCH /api/v1/me/progress/:showId/episodes` also accepts an optional `watchedAt` (ISO time) with
+  `watched: true`: the day the user says they watched those episodes. It must be a real date, at most a day
+  ahead (400 `invalid_watched_at` otherwise); without it the time of the request is used. A past `watchedAt`
+  never moves the show's `lastWatched` backwards.
 - Movies (see `FEATURE_PLAN.md`, section 4). A watched movie is always on the movie watchlist; `watchedOn`
   (`YYYY-MM-DD` or `null`) says whether and when it was watched. The server fetches the movie from TMDB,
   so a client sends no movie body:
