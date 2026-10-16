@@ -32,6 +32,22 @@ const showConcurrency = 8;
 // it abandoned still settles into the provider cache, so the next read has it.
 const tvMazeEnrichmentTimeoutMs = 5000;
 
+// TVMaze gives streaming shows no air time. These services release new episodes
+// at midnight Pacific, 3 a.m. Eastern: 07:00 UTC in summer, 08:00 in winter, so
+// the time is kept in New York's zone rather than as a fixed UTC hour.
+const streamingReleaseTimes = new Map([
+  ['paramount+', { airTime: '03:00', timezone: 'America/New_York' }],
+  ['prime video', { airTime: '03:00', timezone: 'America/New_York' }],
+  ['amazon prime video', { airTime: '03:00', timezone: 'America/New_York' }],
+]);
+
+/// The usual release time of a show TVMaze has no air time for, or null.
+function streamingReleaseTime(tvMazeShow) {
+  if (!tvMazeShow || tvMazeShow.schedule?.time || tvMazeShow.network) return null;
+  const name = String(tvMazeShow.webChannel?.name || '').trim().toLowerCase();
+  return streamingReleaseTimes.get(name) || null;
+}
+
 /// Resolves to [fallback] if [promise] has not settled within [ms].
 function withDeadline(promise, ms, fallback) {
   let timer;
@@ -277,6 +293,7 @@ async function buildSeriesUpcoming(show, { data, episodes }, today, forceRefresh
 
   const schedule = tvMazeShow?.schedule || {};
   const network = tvMazeShow?.network || tvMazeShow?.webChannel || null;
+  const releaseTime = streamingReleaseTime(tvMazeShow);
   const tmdbNetwork = Array.isArray(data.networks) ? data.networks[0] : null;
   const seasons = Array.isArray(data.seasons)
     ? data.seasons.filter((season) => Number(season.season_number) > 0)
@@ -298,10 +315,12 @@ async function buildSeriesUpcoming(show, { data, episodes }, today, forceRefresh
       posterPath: data.poster_path ?? show.posterPath ?? null,
       networkName: network?.name || null,
       networkLogoPath: tmdbNetwork?.logo_path || network?.image?.medium || network?.image?.original || null,
-      airTime: schedule.time || null,
+      airTime: schedule.time || releaseTime?.airTime || null,
       // TVMaze keeps the zone on the network's country, not in the schedule, so a show with an air
-      // time but no zone (every streaming show has neither) cannot be placed on the clock.
-      timezone: schedule.timezone || network?.country?.timezone || null,
+      // time but no zone (most streaming shows have neither) cannot be placed on the clock.
+      timezone: schedule.timezone || network?.country?.timezone || releaseTime?.timezone || null,
+      // True when the time is the service's usual release time, not one TVMaze published.
+      airTimeEstimated: releaseTime != null,
       // False when TVMaze could not be asked: no air time means "unknown yet",
       // not "streaming, no time" (notifications.js, announceAt).
       tvMazeAnswered,
@@ -372,4 +391,4 @@ async function getUpcomingEpisodes({ uid, today, forceRefresh = false, pool }) {
   });
 }
 
-module.exports = { getUpcomingEpisodes };
+module.exports = { getUpcomingEpisodes, streamingReleaseTime };
