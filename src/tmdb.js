@@ -586,7 +586,10 @@ async function getTvMazeShow(name, { forceRefresh = false } = {}) {
           unavailableMessage: 'TVMaze is unavailable',
         });
       } catch (error) {
-        if (error.status === 502 || error.status === 504) return null;
+        // Only TVMaze saying it has no such show is an answer worth caching. A
+        // timeout or an outage (502/504) used to be cached as "no show" too, so
+        // one bad minute hid air times and networks for a day.
+        if (error.providerStatus === 404) return null;
         throw error;
       }
     },
@@ -608,7 +611,8 @@ async function getTvMazeEpisodes(name, { forceRefresh = false } = {}) {
         });
         return Array.isArray(episodes) ? episodes : [];
       } catch (error) {
-        if (error.status === 502 || error.status === 504) return [];
+        // As for the show: only a real "no episodes" is cached.
+        if (error.providerStatus === 404) return [];
         throw error;
       }
     },

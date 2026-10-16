@@ -1,0 +1,69 @@
+const test = require('node:test');
+const assert = require('node:assert/strict');
+const path = require('node:path');
+
+// A stand-in for PostgreSQL that understands what persistent-cache.js sends.
+const rows = new Map();
+const fakePool = {
+  async query(sql, params) {
+    if (/omdb_usage/.test(sql)) return { rows: [{ calls: 1 }] };
+    if (/^\s*SELECT/i.test(sql)) {
+      const [key, ttlMs] = params;
+      const row = rows.get(key);
+      return { rows: row && Date.now() - row.at < ttlMs ? [{ data: row.data }] : [] };
+    }
+    rows.set(params[0], { data: JSON.parse(params[1]), at: Date.now() });
+    return { rows: [] };
+  },
+};
+process.env.TMDB_ACCESS_TOKEN = 'test-token';
+process.env.TVMAZE_BASE_URL = 'https://tvmaze.test';
+const dbPath = require.resolve('../src/db');
+require.cache[dbPath] = { id: dbPath, filename: dbPath, loaded: true, exports: { pool: fakePool } };
+
+let answers = [];
+let requests = 0;
+const undici = require('undici');
+undici.fetch = async () => {
+  requests += 1;
+  const status = answers.length ? answers.shift() : 200;
+  return {
+    ok: status >= 200 && status < 300,
+    status,
+    headers: { get: () => null },
+    json: async () => ({ id: 42, name: 'Show' }),
+  };
+};
+
+function freshTmdb() {
+  for (const name of ['tmdb.js', 'persistent-cache.js', 'omdb-budget.js', 'config.js']) {
+    delete require.cache[path.join(__dirname, '..', 'src', name)];
+  }
+  return require('../src/tmdb');
+}
+
+test.beforeEach(() => {
+  rows.clear();
+  answers = [];
+  requests = 0;
+});
+
+test('a TVMaze outage is not cached as "no show"; the next lookup asks again', async () => {
+  const tmdb = freshTmdb();
+  answers = [503, 503, 503]; // every retry of the first lookup fails
+  await assert.rejects(tmdb.getTvMazeShow('Show'));
+  const afterFailure = requests;
+
+  const show = await tmdb.getTvMazeShow('Show');
+  assert.equal(show.id, 42);
+  assert.ok(requests > afterFailure, 'asked again');
+});
+
+test('TVMaze not knowing a show is cached', async () => {
+  const tmdb = freshTmdb();
+  answers = [404];
+  assert.equal(await tmdb.getTvMazeShow('Unknown'), null);
+  const asked = requests;
+  assert.equal(await tmdb.getTvMazeShow('Unknown'), null);
+  assert.equal(requests, asked, 'not asked twice');
+});
