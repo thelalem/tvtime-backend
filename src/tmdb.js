@@ -50,8 +50,30 @@ const retryableStatuses = new Set([408, 425, 429, 500, 502, 503, 504]);
 // Provider responses are shared by every user tracking the same show, so one
 // cache in front of all of them collapses both duplicate reads inside a single
 // request and the same read across users.
+//
+// Bounded by size as well as count: a full show (its whole run's cast) can be
+// hundreds of KB, and 2,000 of those is more memory than a small host has. The
+// least recently used entries go first; a hit moves an entry to the back.
 const providerCacheMaxEntries = 2000;
+const providerCacheMaxBytes =
+  (Number(process.env.PROVIDER_CACHE_MAX_MB) || 100) * 1024 * 1024;
 const providerCache = new Map();
+let providerCacheBytes = 0;
+
+// "Nothing found", which often means "not yet" (see persistent-cache.js).
+const emptyAnswerTtlMs = 24 * 60 * 60 * 1000;
+
+function isEmptyAnswer(value) {
+  return value == null ||
+    (typeof value === 'object' && value.ratings && typeof value.ratings === 'object' &&
+      Object.keys(value.ratings).length === 0);
+}
+
+function forgetProviderEntry(key) {
+  const entry = providerCache.get(key);
+  if (entry && entry.bytes) providerCacheBytes -= entry.bytes;
+  providerCache.delete(key);
+}
 
 // Aired episode lists barely move. TVMaze's own load balancers cache a show
 // for up to 24 hours and everything else for an hour, so holding its answers
@@ -218,40 +240,63 @@ async function tmdbGet(path, query) {
 
 // Serves `load` from cache, collapsing concurrent reads of the same key into
 // one request. Results are shared by reference — callers must not mutate them.
-function cachedProviderRead(key, load, { forceRefresh = false, ttlMs }) {
-  if (forceRefresh) providerCache.delete(key);
+function cachedProviderRead(key, load, { forceRefresh = false, ttlMs, emptyTtlMs = ttlMs }) {
+  if (forceRefresh) forgetProviderEntry(key);
   const entry = providerCache.get(key);
   if (entry) {
     if (entry.pending) return entry.pending;
-    if (entry.expiresAt > Date.now()) return Promise.resolve(entry.value);
+    if (entry.expiresAt > Date.now()) {
+      // Most recently used goes to the back, so pruning drops the coldest.
+      providerCache.delete(key);
+      providerCache.set(key, entry);
+      return Promise.resolve(entry.value);
+    }
+    forgetProviderEntry(key);
   }
 
   const pending = load()
     .then((value) => {
-      providerCache.set(key, { value, expiresAt: Date.now() + ttlMs });
+      const life = isEmptyAnswer(value) ? Math.min(ttlMs, emptyTtlMs) : ttlMs;
+      const bytes = approximateBytes(value);
+      providerCache.delete(key);
+      providerCache.set(key, { value, expiresAt: Date.now() + life, bytes });
+      providerCacheBytes += bytes;
       pruneProviderCache();
       return value;
     })
     .catch((error) => {
       // Never cache a failure: the next pull-to-refresh must be free to retry.
-      providerCache.delete(key);
+      forgetProviderEntry(key);
       throw error;
     });
   providerCache.set(key, { pending });
   return pending;
 }
 
+function approximateBytes(value) {
+  try {
+    // UTF-16 in memory: about two bytes a character, plus the object overhead
+    // this ignores. Close enough for a budget.
+    return 2 * (JSON.stringify(value) || '').length;
+  } catch (_) {
+    return 0;
+  }
+}
+
 function pruneProviderCache() {
-  if (providerCache.size <= providerCacheMaxEntries) return;
+  const overBudget = () => providerCache.size > providerCacheMaxEntries ||
+    providerCacheBytes > providerCacheMaxBytes;
+  if (!overBudget()) return;
   const now = Date.now();
   for (const [key, entry] of providerCache) {
-    if (!entry.pending && entry.expiresAt <= now) providerCache.delete(key);
+    if (!entry.pending && entry.expiresAt <= now) forgetProviderEntry(key);
   }
-  // Still over budget, so drop entries oldest-first (Map iterates in insertion
-  // order). In-flight reads stay — something is already awaiting them.
+  // Still over budget, so drop the least recently used first (Map iterates in
+  // insertion order, and a hit re-inserts). In-flight reads stay: something is
+  // already awaiting them.
   for (const [key, entry] of providerCache) {
-    if (providerCache.size <= providerCacheMaxEntries) break;
-    if (!entry.pending) providerCache.delete(key);
+    if (!overBudget()) break;
+    if (!entry.pending) forgetProviderEntry(key);
   }
 }
 
@@ -386,6 +431,7 @@ async function getOmdbSeasonRatings(imdbId, seasonNumber, ttlMs = airingSeasonRa
     `omdb:season:${imdbId}:${seasonNumber}`,
     ttlMs,
     () => fetchOmdbSeasonRatings(imdbId, seasonNumber),
+    { emptyTtlMs: emptyAnswerTtlMs },
   );
 }
 
@@ -404,11 +450,41 @@ function omdbQuotaError() {
   return error;
 }
 
+// At most a few OMDb calls at once: a list page asks for 20 ratings and a long
+// show's episode ratings one per season, all in parallel.
+const withOmdbSlot = createRequestLimiter({ concurrency: 4 });
+
+// The one call let through after a block ends, while it runs. When the 30
+// minutes were up, every request waiting on OMDb used to fire at once, and if
+// the quota was still used up each of those failed and counted against it.
+let omdbProbe = null;
+
 // `forList`: a rating for a list of shows, which may spend only the lists'
 // share of the day's calls (omdb-budget.js); a show page or its episode ratings
 // may spend the whole day's.
-async function omdbGet(url, { forList = false } = {}) {
-  if (Date.now() < omdbBlockedUntil) throw omdbQuotaError();
+async function omdbGet(url, options = {}) {
+  for (;;) {
+    if (Date.now() < omdbBlockedUntil) throw omdbQuotaError();
+    if (omdbBlockedUntil === 0) return omdbCall(url, options);
+    // A block has just ended. Wait for the probe if there is one, then look
+    // again: blocked once more, or clear.
+    if (omdbProbe) {
+      await omdbProbe.catch(() => {});
+      continue;
+    }
+    const probe = omdbCall(url, options);
+    omdbProbe = probe;
+    try {
+      const data = await probe;
+      omdbBlockedUntil = 0;
+      return data;
+    } finally {
+      omdbProbe = null;
+    }
+  }
+}
+
+async function omdbCall(url, { forList = false } = {}) {
   const limit = forList ? config.omdbListBudget : config.omdbDailyBudget;
   if (!await takeOmdbCall(limit)) {
     const error = providerError('OMDb daily budget used', 503);
@@ -417,7 +493,7 @@ async function omdbGet(url, { forList = false } = {}) {
   }
   let data;
   try {
-    data = await requestJson(url, {}, 'OMDb is unavailable');
+    data = await withOmdbSlot(() => requestJson(url, {}, 'OMDb is unavailable'));
   } catch (error) {
     // OMDb answers 401 when the daily limit is used up.
     if (error.providerStatus === 401) {
@@ -476,6 +552,7 @@ async function getShowImdbRating(showId, knownImdbId, kind = 'tv', { forList = f
           const ids = await tmdbGet(`/${isMovie ? 'movie' : 'tv'}/${showId}/external_ids`);
           return (ids && ids.imdb_id) || null;
         },
+        { emptyTtlMs: emptyAnswerTtlMs },
       );
       if (!imdbId) return null;
       return readThrough(`omdb:show:${imdbId}`, imdbRatingCacheTtlMs, async () => {
@@ -487,9 +564,9 @@ async function getShowImdbRating(showId, knownImdbId, kind = 'tv', { forList = f
         return data && data.Response !== 'False' && Number.isFinite(rating) && rating > 0
           ? rating
           : null;
-      });
+      }, { emptyTtlMs: emptyAnswerTtlMs });
     },
-    { ttlMs: imdbRatingCacheTtlMs },
+    { ttlMs: imdbRatingCacheTtlMs, emptyTtlMs: emptyAnswerTtlMs },
   );
 }
 

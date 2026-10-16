@@ -75,3 +75,21 @@ test('an id TMDB does not know is answered 404, not 502 like an outage', async (
   answers = [503, 503, 503];
   await assert.rejects(tmdb.getTvShow(999998), (error) => error.status === 502);
 });
+
+test('the memory cache keeps to its size and drops the least recently used first', async () => {
+  process.env.PROVIDER_CACHE_MAX_MB = String(110 / (1024 * 1024)); // room for two small answers
+  try {
+    const tmdb = freshTmdb();
+    await tmdb.getTvShow(1);
+    await tmdb.getTvShow(2);
+    await tmdb.getTvShow(1); // used again: now the most recent
+    await tmdb.getTvShow(3); // over budget: 2 goes, not 1
+    const before = requests;
+    await tmdb.getTvShow(1);
+    assert.equal(requests, before, '1 is still cached');
+    await tmdb.getTvShow(2);
+    assert.equal(requests, before + 1, '2 was dropped');
+  } finally {
+    delete process.env.PROVIDER_CACHE_MAX_MB;
+  }
+});

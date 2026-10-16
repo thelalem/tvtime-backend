@@ -6,12 +6,18 @@ const { pool } = require('./db');
 // provider cache sits in front of this one for repeat reads inside a process.
 //
 // A database problem never fails the request: it just means asking the provider.
-async function readThrough(key, ttlMs, load) {
+//
+// `emptyTtlMs`: how long an empty answer lasts (null, or no ratings at all).
+// "Nothing found" often means "not yet": a new show gets its IMDb id days after
+// it appears, and kept for the full 90 days it showed TMDB's rating for months.
+async function readThrough(key, ttlMs, load, { emptyTtlMs = ttlMs } = {}) {
   try {
     const { rows } = await pool.query(
       `SELECT data FROM provider_cache
-       WHERE key = $1 AND fetched_at > NOW() - ($2 * INTERVAL '1 millisecond')`,
-      [key, ttlMs],
+       WHERE key = $1 AND fetched_at > NOW() - ((CASE
+         WHEN data = 'null'::jsonb OR data->'ratings' = '{}'::jsonb THEN $3::bigint
+         ELSE $2::bigint END) * INTERVAL '1 millisecond')`,
+      [key, ttlMs, emptyTtlMs],
     );
     if (rows.length) return rows[0].data;
   } catch (error) {

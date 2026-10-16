@@ -16,9 +16,13 @@ const fakePool = {
       return { rows: [{ calls: omdbCallsToday }] };
     }
     if (/^\s*SELECT/i.test(sql)) {
-      const [key, ttlMs] = params;
+      // As the real query: an empty answer (null, or no ratings) has its own, shorter life.
+      const [key, ttlMs, emptyTtlMs = ttlMs] = params;
       const row = rows.get(key);
-      return { rows: row && Date.now() - row.at < ttlMs ? [{ data: row.data }] : [] };
+      const empty = row && (row.data === null ||
+        (row.data && row.data.ratings && Object.keys(row.data.ratings).length === 0));
+      const life = empty ? emptyTtlMs : ttlMs;
+      return { rows: row && Date.now() - row.at < life ? [{ data: row.data }] : [] };
     }
     const [key, json] = params;
     rows.set(key, { data: JSON.parse(json), at: Date.now() });
@@ -208,5 +212,61 @@ test("lists spend only their share of the day's OMDb calls; show pages keep the 
     delete process.env.OMDB_DAILY_BUDGET;
     delete process.env.OMDB_LIST_BUDGET;
     undici.fetch = stubFetch;
+  }
+});
+
+// Moves the clock on for the code under test.
+function laterBy(ms) {
+  const realNow = Date.now;
+  Date.now = () => realNow() + ms;
+  return () => { Date.now = realNow; };
+}
+
+test('"no IMDb id yet" is asked again after a day, not kept for 90', async () => {
+  const json = (body) => ({ ok: true, status: 200, headers: { get: () => null }, json: async () => body });
+  let imdbId = null;
+  let idLookups = 0;
+  undici.fetch = async (url) => {
+    if (String(url).includes('/external_ids')) {
+      idLookups += 1;
+      return json({ imdb_id: imdbId });
+    }
+    calls.omdb += 1;
+    return json({ Response: 'True', imdbRating: '8.1' });
+  };
+  try {
+    const tmdb = freshTmdb();
+    const list = () => ({ results: [{ id: 5, vote_average: 6 }] });
+    assert.equal((await tmdb.withImdbRatings(list())).results[0].vote_average, 6);
+    assert.equal(idLookups, 1);
+
+    imdbId = 'tt5'; // TMDB has it now
+    const restore = laterBy(2 * 24 * 60 * 60 * 1000);
+    try {
+      const rated = await tmdb.withImdbRatings(list());
+      assert.equal(idLookups, 2, 'asked again after a day');
+      assert.equal(rated.results[0].vote_average, 8.1);
+    } finally {
+      restore();
+    }
+  } finally {
+    undici.fetch = stubFetch;
+  }
+});
+
+test('when an OMDb block ends, one call tests the water; the rest wait for it', async () => {
+  omdbMode = 'quota';
+  const tmdb = freshTmdb();
+  await assert.rejects(tmdb.getImdbRatings(1), (error) => error.status === 503);
+  const spent = calls.omdb;
+
+  const restore = laterBy(31 * 60 * 1000);
+  try {
+    // Still over quota. Without the probe each season of each show called OMDb.
+    const results = await Promise.allSettled([7, 8, 9].map((id) => tmdb.getImdbRatings(id)));
+    assert.ok(results.every((result) => result.status === 'rejected'));
+    assert.equal(calls.omdb - spent, 1, 'only the probe reached OMDb');
+  } finally {
+    restore();
   }
 });
