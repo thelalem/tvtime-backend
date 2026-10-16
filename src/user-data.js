@@ -400,16 +400,21 @@ router.put('/me/:collection/:seriesId', async (request, response, next) => {
   }
   try {
     const data = { ...body, id: seriesId };
-    const { rows } = await pool.query(
-      `INSERT INTO ${table}(firebase_uid, series_id, series) VALUES ($1,$2,$3::jsonb)
-       ON CONFLICT(firebase_uid,series_id) DO UPDATE
-       SET series=${table}.series || EXCLUDED.series
-       RETURNING series AS data, added_at AS "addedAt"`,
-      [request.user.uid, seriesId, JSON.stringify(data)],
-    );
-    // Adding a stopped or removed show back (from search, or by ticking an episode) makes it an
-    // ordinary watchlist show again, with its progress.
-    if (table === 'watchlist') await clearShowState(pool, request.user.uid, seriesId);
+    // In one transaction: back on the watchlist but still marked stopped was
+    // possible when the second step failed.
+    const rows = await inTransaction(async (db) => {
+      const result = await db.query(
+        `INSERT INTO ${table}(firebase_uid, series_id, series) VALUES ($1,$2,$3::jsonb)
+         ON CONFLICT(firebase_uid,series_id) DO UPDATE
+         SET series=${table}.series || EXCLUDED.series
+         RETURNING series AS data, added_at AS "addedAt"`,
+        [request.user.uid, seriesId, JSON.stringify(data)],
+      );
+      // Adding a stopped or removed show back (from search, or by ticking an episode) makes it
+      // an ordinary watchlist show again, with its progress.
+      if (table === 'watchlist') await clearShowState(db, request.user.uid, seriesId);
+      return result.rows;
+    });
     invalidateRecommendations(request.user.uid);
     response.json({ ...rows[0].data, addedAt: rows[0].addedAt });
   } catch (error) { next(error); }
@@ -718,6 +723,22 @@ router.post('/me/progress/:seriesId/import', async (request, response, next) => 
 // the key checks or the per-show lock the tick and import routes use, and no
 // part of the app called it any more.
 
+// Runs `work` with one client inside a transaction: all of it or none of it.
+async function inTransaction(work) {
+  const db = await pool.connect();
+  try {
+    await db.query('BEGIN');
+    const result = await work(db);
+    await db.query('COMMIT');
+    return result;
+  } catch (error) {
+    await db.query('ROLLBACK').catch(() => {});
+    throw error;
+  } finally {
+    db.release();
+  }
+}
+
 router.delete('/me/progress/:seriesId', async (request, response, next) => {
   const seriesId = Number.parseInt(request.params.seriesId, 10);
   // Unvalidated, a non-numeric id reached Postgres as NaN and came back as a
@@ -726,12 +747,14 @@ router.delete('/me/progress/:seriesId', async (request, response, next) => {
     return response.status(400).json({ error: 'invalid_series_id' });
   }
   try {
-    await pool.query('DELETE FROM show_progress WHERE firebase_uid=$1 AND series_id=$2',
-      [request.user.uid, seriesId]);
-    // Deleting a show's history on purpose also forgets what was unmarked, so
-    // an import can restore it.
-    await pool.query('DELETE FROM unwatched_episodes WHERE firebase_uid=$1 AND series_id=$2',
-      [request.user.uid, seriesId]);
+    await inTransaction(async (db) => {
+      await db.query('DELETE FROM show_progress WHERE firebase_uid=$1 AND series_id=$2',
+        [request.user.uid, seriesId]);
+      // Deleting a show's history on purpose also forgets what was unmarked, so
+      // an import can restore it.
+      await db.query('DELETE FROM unwatched_episodes WHERE firebase_uid=$1 AND series_id=$2',
+        [request.user.uid, seriesId]);
+    });
     response.status(204).end();
   } catch (error) { next(error); }
 });
