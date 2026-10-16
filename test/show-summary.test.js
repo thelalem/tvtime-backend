@@ -23,6 +23,7 @@ undici.fetch = async (url) => {
       backdrop_path: '/b.jpg',
       vote_average: 7.4,
       first_air_date: '2020-01-01',
+      seasons: [{ season_number: 0, episode_count: 2, name: 'Specials' }, { season_number: 1, episode_count: 10 }],
       aggregate_credits: { cast: new Array(500).fill({ name: 'x' }) },
     }),
   };
@@ -48,6 +49,7 @@ test('a show summary carries only what an import stores, with no OMDb call', asy
       backdrop_path: '/b.jpg',
       vote_average: 7.4,
       first_air_date: '2020-01-01',
+      seasons: [{ season_number: 0, episode_count: 2 }, { season_number: 1, episode_count: 10 }],
     });
     assert.ok(asked.every((url) => !url.startsWith('https://omdb.test')), 'OMDb not asked');
     assert.ok(asked.every((url) => !url.includes('append_to_response')), 'no full show');

@@ -163,6 +163,10 @@ app.get('/api/v1/shows/:showId/summary', async (request, response, next) => {
       backdrop_path: show.backdrop_path || null,
       vote_average: show.vote_average || 0,
       first_air_date: show.first_air_date || '',
+      // How many episodes each season has (the TV Time import drops episodes TMDB does not have).
+      seasons: (Array.isArray(show.seasons) ? show.seasons : [])
+        .filter((season) => Number.isInteger(season.season_number))
+        .map((season) => ({ season_number: season.season_number, episode_count: season.episode_count || 0 })),
     });
   } catch (error) { next(error); }
 });
