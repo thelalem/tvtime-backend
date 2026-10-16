@@ -5,6 +5,7 @@ const { getTvSeason, getTvShowClassificationData, withImdbRatings } = require('.
 const { getUpcomingEpisodes } = require('./upcoming');
 const { getRecommendations, invalidateRecommendations } = require('./recommendations');
 const { registerMeMovieRoutes } = require('./me-movies');
+const { registerEpisodeDataRoutes } = require('./episode-data');
 const { registerNotificationRoutes } = require('./notifications');
 const { clearShowState, loadShowStates, registerShowStateRoutes } = require('./show-states');
 const { hasAired, isValidTimeZone, localDateString } = require('./local-date');
@@ -58,6 +59,7 @@ router.use(async (request, response, next) => {
 registerMeMovieRoutes(router);
 registerShowStateRoutes(router);
 registerNotificationRoutes(router);
+registerEpisodeDataRoutes(router);
 
 router.get('/me', async (request, response, next) => {
   try {

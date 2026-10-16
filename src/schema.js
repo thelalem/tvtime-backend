@@ -157,6 +157,18 @@ async function initializeDatabase() {
       PRIMARY KEY (firebase_uid, series_id, season, episode)
     );
 
+    -- What a user records about one episode besides watching it (see episode-data.js). The rating
+    -- is 1-5; later answers (feeling, favorite cast member, device) become more columns here.
+    CREATE TABLE IF NOT EXISTS episode_user_data (
+      firebase_uid TEXT NOT NULL REFERENCES app_users(firebase_uid) ON DELETE CASCADE,
+      series_id BIGINT NOT NULL,
+      season INTEGER NOT NULL,
+      episode INTEGER NOT NULL,
+      rating SMALLINT CHECK (rating BETWEEN 1 AND 5),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      PRIMARY KEY (firebase_uid, series_id, season, episode)
+    );
+
     -- Slow-changing provider answers (see persistent-cache.js), so they survive
     -- a restart. Keyed by what was asked, e.g. 'omdb:season:tt0386676:3'.
     CREATE TABLE IF NOT EXISTS provider_cache (

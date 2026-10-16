@@ -80,6 +80,10 @@ The PostgreSQL tables are created on startup. User-data endpoints live under
   to the silent channel `new_episodes_silent` instead of `new_episodes`.
   `notifications_sent` keeps it to once per episode. Uses the same Firebase service account as sign-in.
   Set `NOTIFICATIONS_DISABLED=1` to turn the sweep off.
+- Episode ratings (`FEATURE_PLAN.md`, section 9; `src/episode-data.js`). `GET /api/v1/me/shows/:showId/episode-ratings`
+  returns `{ ratings: { "S1E2": 4 } }` (1 to 5); `PUT /me/shows/:showId/episodes/:season/:episode/rating` with
+  `{ rating }` sets one (400 `invalid_rating` outside 1-5); `DELETE` on the same path clears it. The row is the
+  per-episode home for the later answers (feeling, favorite cast member, device) too.
 - Movies (see `FEATURE_PLAN.md`, section 4). A watched movie is always on the movie watchlist; `watchedOn`
   (`YYYY-MM-DD` or `null`) says whether and when it was watched. The server fetches the movie from TMDB,
   so a client sends no movie body:
