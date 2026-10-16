@@ -14,6 +14,7 @@ const CATCH_UP_MS = 24 * 60 * 60 * 1000;
 // Local hours [SILENT_FROM, 24) and [0, SILENT_UNTIL) are delivered without sound.
 const SILENT_FROM = 23;
 const SILENT_UNTIL = 7;
+const POSTER_BASE = 'https://image.tmdb.org/t/p/w342';
 const SWEEP_INTERVAL_MS = 15 * 60 * 1000;
 
 const INVALID_TOKEN_CODES = new Set([
@@ -37,11 +38,12 @@ function episodeLabel(season, episode) {
 
 // The real sender. Loaded lazily so tests (and a server without Firebase set up) never touch it.
 // Resolves to the tokens FCM says are dead, which the caller deletes.
-async function sendThroughFcm(tokens, { title, body, data, tag, silent }) {
+async function sendThroughFcm(tokens, { title, body, data, tag, silent, imageUrl }) {
   const { admin } = require('./firebase');
   const result = await admin.messaging().sendEachForMulticast({
     tokens,
-    notification: { title, body },
+    // imageUrl: Android draws it in the expanded notification and as a thumbnail when collapsed.
+    notification: { title, body, ...(imageUrl ? { imageUrl } : {}) },
     data,
     android: {
       priority: 'high',
@@ -133,6 +135,7 @@ async function notifyUser(db, user, { getUpcoming, send, now }) {
         data: { type: 'new_episode', seriesId: String(seriesId), season: String(season), episode: String(episode) },
         tag: `episode-${seriesId}-${season}-${episode}`,
         silent,
+        imageUrl: item.posterPath ? `${POSTER_BASE}${item.posterPath}` : undefined,
       });
       if (dead?.length) await db.query('DELETE FROM device_tokens WHERE token = ANY($1)', [dead]);
       count += 1;

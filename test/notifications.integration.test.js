@@ -59,6 +59,7 @@ const tokenFor = (uid) => `${uid}-token-`.padEnd(40, 'x');
 // An Upcoming item for [seriesId] airing on [airDate].
 const item = (seriesId, name, season, episode, airDate) => ({
   seriesId,
+  posterPath: `/${seriesId}.jpg`,
   seriesName: name,
   episode: { seasonNumber: season, episodeNumber: episode, airDate },
 });
@@ -153,6 +154,7 @@ test('sweep: sends today\'s episode once, with the show name and S03 | E01', asy
   assert.deepEqual(calls[0].tokens, [tokenFor(uid)]);
   assert.equal(calls[0].message.title, 'Severance');
   assert.equal(calls[0].message.body, 'S03 | E01');
+  assert.equal(calls[0].message.imageUrl, 'https://image.tmdb.org/t/p/w342/100.jpg');
   assert.deepEqual(calls[0].message.data, { type: 'new_episode', seriesId: '100', season: '3', episode: '1' });
 
   assert.equal(await sweep(uid, upcoming, send), 0, 'a second sweep does not repeat it');
