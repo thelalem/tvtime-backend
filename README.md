@@ -70,8 +70,11 @@ The PostgreSQL tables are created on startup. User-data endpoints live under
   FCM token with `PUT /api/v1/me/devices` (`{ token, platform }`) and removes it on sign-out with
   `DELETE /me/devices` (`{ token }`). `GET`, `PATCH /me/notification-settings` (`{ enabled }`) and
   `PUT`, `DELETE /me/notification-settings/muted/:seriesId` hold the master switch and per-show mutes.
-  A sweep every 15 minutes sends one push per episode airing on the user's local date once their local
-  time is 09:00 or later (title = show name, body = `S03 | E01`, data = `seriesId`, `season`, `episode`);
+  A sweep every 15 minutes sends one push per episode when its moment arrives: the air time in the
+  network's zone when TVMaze has both (`airTime`, `timezone`), otherwise 09:00 on the air date in the
+  user's zone (streaming shows have no time). A missed moment is still sent for 24 hours. Title = show
+  name, body = `S03 | E01`, data = `seriesId`, `season`, `episode`; between 23:00 and 07:00 local it goes
+  to the silent channel `new_episodes_silent` instead of `new_episodes`.
   `notifications_sent` keeps it to once per episode. Uses the same Firebase service account as sign-in.
   Set `NOTIFICATIONS_DISABLED=1` to turn the sweep off.
 - Movies (see `FEATURE_PLAN.md`, section 4). A watched movie is always on the movie watchlist; `watchedOn`

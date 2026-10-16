@@ -284,7 +284,9 @@ async function buildSeriesUpcoming(show, { data, episodes }, today, forceRefresh
       networkName: network?.name || null,
       networkLogoPath: tmdbNetwork?.logo_path || network?.image?.medium || network?.image?.original || null,
       airTime: schedule.time || null,
-      timezone: schedule.timezone || null,
+      // TVMaze keeps the zone on the network's country, not in the schedule, so a show with an air
+      // time but no zone (every streaming show has neither) cannot be placed on the clock.
+      timezone: schedule.timezone || network?.country?.timezone || null,
       totalEpisodes,
       isPremiere: Number(episode.season_number) > 0 && Number(episode.episode_number) === 1,
       isLatest: index === 0 && isDate(previousDate) &&

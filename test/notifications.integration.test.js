@@ -204,3 +204,29 @@ test('sweep: a failed send is retried next time; dead tokens are removed', async
   assert.equal(await sweep(uid, [item(401, 'Dead', 1, 1, '2026-10-16')], dead), 1);
   assert.equal((await pool.query('SELECT 1 FROM device_tokens WHERE firebase_uid=$1', [uid])).rowCount, 0);
 });
+
+test('sweep: a show with an air time and zone goes out at that moment, silently at night', async () => {
+  const uid = newUser();
+  await setup(uid); // Addis Ababa, UTC+3
+  const calls = [];
+  const send = async (tokens, message) => { calls.push(message); return []; };
+  // 20:30 in New York on 16 Oct is 00:30 UTC on the 17th, 03:30 in Addis Ababa.
+  const upcoming = [{ ...item(500, 'Network Show', 1, 4, '2026-10-16'), airTime: '20:30', timezone: 'America/New_York' }];
+
+  assert.equal(await sweep(uid, upcoming, send, new Date('2026-10-17T00:20:00Z')), 0, 'not yet');
+  assert.equal(await sweep(uid, upcoming, send, new Date('2026-10-17T00:40:00Z')), 1);
+  assert.equal(calls[0].silent, true, '03:40 local is silent');
+});
+
+test('sweep: daytime pushes make sound; an episode older than a day is not announced', async () => {
+  const uid = newUser();
+  await setup(uid);
+  const calls = [];
+  const send = async (tokens, message) => { calls.push(message); return []; };
+
+  assert.equal(await sweep(uid, [item(600, 'Daytime', 1, 1, '2026-10-16')], send), 1);
+  assert.equal(calls[0].silent, false);
+
+  const old = [item(601, 'Old', 1, 1, '2026-10-14')];
+  assert.equal(await sweep(uid, old, send), 0);
+});

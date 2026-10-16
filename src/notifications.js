@@ -5,11 +5,15 @@
 // their local date, once their local morning has started, sends one push through Firebase Cloud
 // Messaging. `notifications_sent` makes each (user, episode) go out at most once.
 const { pool } = require('./db');
-const { isValidTimeZone, localDateString } = require('./local-date');
+const { localDateString, localHour, zonedDateTimeToUtc } = require('./local-date');
 
-// Local hour at which the day's episodes are announced. Air dates carry no time, so this is
-// "the morning of the day it airs" rather than the minute it airs.
-const NOTIFY_HOUR = 9;
+// Shows with no air time (every streaming show) are announced at this local hour on the air date.
+const FALLBACK_HOUR = 9;
+// A push goes out when its moment has passed, for this long afterwards (a restart, a failed send).
+const CATCH_UP_MS = 24 * 60 * 60 * 1000;
+// Local hours [SILENT_FROM, 24) and [0, SILENT_UNTIL) are delivered without sound.
+const SILENT_FROM = 23;
+const SILENT_UNTIL = 7;
 const SWEEP_INTERVAL_MS = 15 * 60 * 1000;
 
 const INVALID_TOKEN_CODES = new Set([
@@ -18,11 +22,12 @@ const INVALID_TOKEN_CODES = new Set([
   'messaging/invalid-argument',
 ]);
 
-function localHour(timeZone, now) {
-  const zone = isValidTimeZone(timeZone) ? timeZone : 'UTC';
-  const hour = new Intl.DateTimeFormat('en-GB', { timeZone: zone, hour: '2-digit', hour12: false })
-    .formatToParts(now).find((part) => part.type === 'hour').value;
-  return Number(hour) % 24;
+// When this episode should be announced: its air time in the network's zone when TVMaze knows
+// both, otherwise FALLBACK_HOUR on the air date in the user's own zone.
+function announceAt(item, userTimeZone) {
+  const airDate = item.episode?.airDate;
+  return zonedDateTimeToUtc(airDate, item.airTime, item.timezone)
+    || zonedDateTimeToUtc(airDate, `${FALLBACK_HOUR}:00`, userTimeZone || 'UTC');
 }
 
 function episodeLabel(season, episode) {
@@ -32,7 +37,7 @@ function episodeLabel(season, episode) {
 
 // The real sender. Loaded lazily so tests (and a server without Firebase set up) never touch it.
 // Resolves to the tokens FCM says are dead, which the caller deletes.
-async function sendThroughFcm(tokens, { title, body, data, tag }) {
+async function sendThroughFcm(tokens, { title, body, data, tag, silent }) {
   const { admin } = require('./firebase');
   const result = await admin.messaging().sendEachForMulticast({
     tokens,
@@ -40,7 +45,7 @@ async function sendThroughFcm(tokens, { title, body, data, tag }) {
     data,
     android: {
       priority: 'high',
-      notification: { channelId: 'new_episodes', tag },
+      notification: { channelId: silent ? 'new_episodes_silent' : 'new_episodes', tag },
     },
   });
   const dead = [];
@@ -70,7 +75,6 @@ async function runNotificationSweep({
   );
   let sent = 0;
   for (const user of users) {
-    if (localHour(user.timezone, now) < NOTIFY_HOUR) continue;
     try {
       sent += await notifyUser(db, user, { getUpcoming, send, now });
     } catch (error) {
@@ -81,10 +85,17 @@ async function runNotificationSweep({
 }
 
 async function notifyUser(db, user, { getUpcoming, send, now }) {
-  const today = localDateString(user.timezone, now);
-  const upcoming = await getUpcoming({ uid: user.uid, today, pool: db });
-  const airing = upcoming.filter((item) => item.episode?.airDate === today);
+  // Asked from yesterday: an episode that aired late yesterday in the network's zone can be
+  // due only now in the user's.
+  const yesterday = localDateString(user.timezone, new Date(now.getTime() - 24 * 60 * 60 * 1000));
+  const upcoming = await getUpcoming({ uid: user.uid, today: yesterday, pool: db });
+  const airing = upcoming.filter((item) => {
+    const at = announceAt(item, user.timezone);
+    return at && at <= now && now.getTime() - at.getTime() < CATCH_UP_MS;
+  });
   if (!airing.length) return 0;
+  const hour = localHour(user.timezone, now);
+  const silent = hour >= SILENT_FROM || hour < SILENT_UNTIL;
 
   const [muted, progress, tokens] = await Promise.all([
     db.query('SELECT series_id FROM muted_shows WHERE firebase_uid=$1', [user.uid]),
@@ -121,6 +132,7 @@ async function notifyUser(db, user, { getUpcoming, send, now }) {
         body: episodeLabel(season, episode),
         data: { type: 'new_episode', seriesId: String(seriesId), season: String(season), episode: String(episode) },
         tag: `episode-${seriesId}-${season}-${episode}`,
+        silent,
       });
       if (dead?.length) await db.query('DELETE FROM device_tokens WHERE token = ANY($1)', [dead]);
       count += 1;

@@ -37,4 +37,40 @@ function hasAired(airDate, today) {
   return typeof airDate === 'string' && DATE_ONLY.test(airDate) && airDate <= today;
 }
 
-module.exports = { hasAired, isValidTimeZone, localDateString };
+// Milliseconds [timeZone] is ahead of UTC at the instant [ms].
+function zoneOffsetMs(timeZone, ms) {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone, hourCycle: 'h23', year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', second: '2-digit',
+  }).formatToParts(new Date(ms));
+  const pick = (type) => Number(parts.find((part) => part.type === type).value);
+  const asUtc = Date.UTC(pick('year'), pick('month') - 1, pick('day'), pick('hour'), pick('minute'), pick('second'));
+  return asUtc - Math.floor(ms / 1000) * 1000;
+}
+
+// The instant (a Date) at which the wall clock in [timeZone] reads [date] [time] ("YYYY-MM-DD",
+// "HH:MM"). Null for input that is not a date and time or a zone this runtime does not know.
+function zonedDateTimeToUtc(date, time, timeZone) {
+  if (!DATE_ONLY.test(date || '') || !/^\d{1,2}:\d{2}$/.test(time || '') || !isValidTimeZone(timeZone)) {
+    return null;
+  }
+  const [hour, minute] = time.split(':').map(Number);
+  const [year, month, day] = date.split('-').map(Number);
+  if (hour > 23 || minute > 59) return null;
+  const wallAsUtc = Date.UTC(year, month - 1, day, hour, minute);
+  // The offset depends on the instant it is measured at, so settle it in two steps (this also
+  // lands correctly across a daylight-saving change).
+  let guess = wallAsUtc - zoneOffsetMs(timeZone, wallAsUtc);
+  guess = wallAsUtc - zoneOffsetMs(timeZone, guess);
+  return new Date(guess);
+}
+
+// Hour of day (0-23) on the wall clock of [timeZone] at [now]; UTC for an unknown zone.
+function localHour(timeZone, now = new Date()) {
+  const zone = isValidTimeZone(timeZone) ? timeZone : 'UTC';
+  const hour = new Intl.DateTimeFormat('en-GB', { timeZone: zone, hour: '2-digit', hour12: false })
+    .formatToParts(now).find((part) => part.type === 'hour').value;
+  return Number(hour) % 24;
+}
+
+module.exports = { hasAired, isValidTimeZone, localDateString, localHour, zonedDateTimeToUtc };
