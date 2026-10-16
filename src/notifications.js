@@ -17,10 +17,12 @@ const SILENT_UNTIL = 7;
 const POSTER_BASE = 'https://image.tmdb.org/t/p/w185';
 const SWEEP_INTERVAL_MS = 15 * 60 * 1000;
 
+// The answers that mean the phone's token is dead. Not 'invalid-argument': it
+// can also mean a bad message, and treating it as dead deleted every one of a
+// user's devices.
 const INVALID_TOKEN_CODES = new Set([
   'messaging/registration-token-not-registered',
   'messaging/invalid-registration-token',
-  'messaging/invalid-argument',
 ]);
 
 // When TVMaze could not be asked, the latest a push waits for it on the air date (user's zone).
@@ -45,7 +47,24 @@ function episodeLabel(season, episode) {
 
 // The real sender. Loaded lazily so tests (and a server without Firebase set up) never touch it.
 // Resolves to the tokens FCM says are dead, which the caller deletes.
-async function sendThroughFcm(tokens, { title, body, data, tag, silent, imageUrl, posterPath, backdropPath }) {
+async function sendThroughFcm(tokens, message) {
+  const first = await multicast(tokens, message);
+  const dead = [...first.dead];
+  let { delivered, error } = first;
+  // A phone that failed for a passing reason gets one more try now: once any
+  // phone has the episode it counts as announced, so no later sweep sends it.
+  if (first.retry.length) {
+    const second = await multicast(first.retry, message);
+    dead.push(...second.dead);
+    delivered += second.delivered;
+    error = error || second.error;
+  }
+  // Nothing delivered and nothing proven dead: a transient failure, so let the caller retry later.
+  if (!delivered && !dead.length) throw new Error(error || 'FCM send failed');
+  return dead;
+}
+
+async function multicast(tokens, { title, body, data, tag, silent, imageUrl, posterPath, backdropPath }) {
   const { admin } = require('./firebase');
   const result = await admin.messaging().sendEachForMulticast({
     tokens,
@@ -66,16 +85,15 @@ async function sendThroughFcm(tokens, { title, body, data, tag, silent, imageUrl
     android: { priority: 'high' },
   });
   const dead = [];
+  const retry = [];
   let delivered = 0;
   result.responses.forEach((item, index) => {
-    if (item.success) { delivered += 1; return; }
-    if (INVALID_TOKEN_CODES.has(item.error?.code)) dead.push(tokens[index]);
+    if (item.success) delivered += 1;
+    else if (INVALID_TOKEN_CODES.has(item.error?.code)) dead.push(tokens[index]);
+    else retry.push(tokens[index]);
   });
-  // Nothing delivered and nothing proven dead: a transient failure, so let the caller retry later.
-  if (!delivered && !dead.length) {
-    throw new Error(result.responses.find((item) => item.error)?.error?.message || 'FCM send failed');
-  }
-  return dead;
+  const error = result.responses.find((item) => item.error)?.error?.message || null;
+  return { dead, retry, delivered, error };
 }
 
 // One pass over every user. `getUpcoming`, `send` and `now` are parameters so tests can drive it.
@@ -286,4 +304,9 @@ function registerNotificationRoutes(router) {
   });
 }
 
-module.exports = { registerNotificationRoutes, runNotificationSweep, startNotificationSweeps };
+module.exports = {
+  registerNotificationRoutes,
+  runNotificationSweep,
+  sendThroughFcm,
+  startNotificationSweeps,
+};
