@@ -31,6 +31,7 @@ const express = require('express');
 const { pool } = require('../src/db');
 const { initializeDatabase } = require('../src/schema');
 const { router } = require('../src/user-data');
+const { loadHistory } = require('../src/recommendations');
 
 const users = [];
 let server;
@@ -106,4 +107,18 @@ test('bad input is refused', async () => {
   assert.equal((await api(uid, 'PUT', '/me/shows/70/episodes/x/1/rating', { rating: 3 })).status, 400);
   assert.equal((await api(uid, 'PUT', '/me/shows/0/episodes/1/1/rating', { rating: 3 })).status, 400);
   assert.equal((await api(uid, 'GET', '/me/shows/abc/episode-ratings')).status, 400);
+});
+
+test('the recommendation history reads each show\'s average rating and how many episodes it covers', async () => {
+  const uid = newUser();
+  await api(uid, 'PUT', '/me/shows/80/episodes/1/1/rating', { rating: 5 });
+  await api(uid, 'PUT', '/me/shows/80/episodes/1/2/rating', { rating: 3 });
+  await api(uid, 'PUT', '/me/shows/81/episodes/2/1/rating', { rating: 1 });
+  const { ratings } = await loadHistory(uid);
+  assert.deepEqual(ratings.get(80), { average: 4, count: 2 });
+  assert.deepEqual(ratings.get(81), { average: 1, count: 1 });
+  assert.equal(ratings.has(82), false);
+
+  await api(uid, 'DELETE', '/me/shows/81/episodes/2/1/rating');
+  assert.equal((await loadHistory(uid)).ratings.has(81), false, 'a cleared rating no longer counts');
 });

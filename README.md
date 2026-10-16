@@ -84,6 +84,9 @@ The PostgreSQL tables are created on startup. User-data endpoints live under
   returns `{ ratings: { "S1E2": 4 } }` (1 to 5); `PUT /me/shows/:showId/episodes/:season/:episode/rating` with
   `{ rating }` sets one (400 `invalid_rating` outside 1-5); `DELETE` on the same path clears it. The row is the
   per-episode home for the later answers (feeling, favorite cast member, device) too.
+  The ratings steer `GET /me/recommendations`: a show's seed weight is multiplied by 2 for an average of 4.5
+  or more, 1.5 for 3.5 or more, 0 for 2 or less (two ratings at least; a favorite is halved instead), and left
+  alone otherwise or when unrated (`ratingFactor` in `src/recommendations.js`).
 - `PATCH /api/v1/me/progress/:showId/episodes` also accepts an optional `watchedAt` (ISO time) with
   `watched: true`: the day the user says they watched those episodes. It must be a real date, at most a day
   ahead (400 `invalid_watched_at` otherwise); without it the time of the request is used. A past `watchedAt`

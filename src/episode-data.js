@@ -5,6 +5,7 @@
 // row, so they need no new table. The watch itself stays in show_progress; this table never says
 // whether an episode was watched.
 const { pool } = require('./db');
+const { invalidateRecommendations } = require('./recommendations');
 
 function parseId(value) {
   const id = Number.parseInt(value, 10);
@@ -52,6 +53,7 @@ function registerEpisodeDataRoutes(router) {
          DO UPDATE SET rating=EXCLUDED.rating, updated_at=NOW()`,
         [request.user.uid, seriesId, season, episode, rating],
       );
+      invalidateRecommendations(request.user.uid);
       response.json({ rating });
     } catch (error) { next(error); }
   });
@@ -75,6 +77,7 @@ function registerEpisodeDataRoutes(router) {
          WHERE firebase_uid=$1 AND series_id=$2 AND season=$3 AND episode=$4 AND rating IS NULL`,
         [request.user.uid, seriesId, season, episode],
       );
+      invalidateRecommendations(request.user.uid);
       response.json({ rating: null });
     } catch (error) { next(error); }
   });
