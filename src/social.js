@@ -156,9 +156,11 @@ function registerSocialRoutes(router, { onFollow = async () => {} } = {}) {
     const problem = usernameProblem(request.query.name);
     if (problem) return response.json({ available: false, reason: problem });
     const { rows } = await pool.query(
-      'SELECT firebase_uid FROM app_users WHERE lower(username) = $1', [name],
+      `SELECT firebase_uid FROM app_users WHERE lower(username) = $1
+       UNION ALL SELECT firebase_uid FROM username_holds WHERE username = $1 AND released_at > NOW() - INTERVAL '14 days'`,
+      [name],
     );
-    if (rows.length && rows[0].firebase_uid !== request.user.uid) {
+    if (rows.some((row) => row.firebase_uid !== request.user.uid)) {
       return response.json({ available: false, reason: 'taken' });
     }
     return response.json({ available: true, username: name });
@@ -168,15 +170,43 @@ function registerSocialRoutes(router, { onFollow = async () => {} } = {}) {
     const problem = usernameProblem((request.body || {}).username);
     if (problem) return response.status(400).json({ error: problem });
     const name = normalizeUsername(request.body.username);
+    const uid = request.user.uid;
+    const db = await pool.connect();
     try {
-      const { rowCount } = await pool.query(
-        'UPDATE app_users SET username = $2, updated_at = NOW() WHERE firebase_uid = $1',
-        [request.user.uid, name],
+      await db.query('BEGIN');
+      // Someone else gave this name up less than 14 days ago: it is still theirs.
+      const held = await db.query(
+        `SELECT 1 FROM username_holds
+         WHERE username = $1 AND firebase_uid <> $2 AND released_at > NOW() - INTERVAL '14 days'`,
+        [name, uid],
       );
-      if (!rowCount) return response.status(404).json({ error: 'no_account' });
+      if (held.rowCount) {
+        await db.query('ROLLBACK');
+        return response.status(409).json({ error: 'taken' });
+      }
+      const before = await db.query('SELECT username FROM app_users WHERE firebase_uid = $1 FOR UPDATE', [uid]);
+      if (!before.rowCount) {
+        await db.query('ROLLBACK');
+        return response.status(404).json({ error: 'no_account' });
+      }
+      await db.query('UPDATE app_users SET username = $2, updated_at = NOW() WHERE firebase_uid = $1', [uid, name]);
+      const old = before.rows[0].username && before.rows[0].username.toLowerCase();
+      if (old && old !== name) {
+        await db.query(
+          `INSERT INTO username_holds(username, firebase_uid) VALUES ($1, $2)
+           ON CONFLICT (username) DO UPDATE SET firebase_uid = EXCLUDED.firebase_uid, released_at = NOW()`,
+          [old, uid],
+        );
+      }
+      // Taking a name back (or a new one) ends its hold.
+      await db.query('DELETE FROM username_holds WHERE username = $1', [name]);
+      await db.query('COMMIT');
     } catch (error) {
+      await db.query('ROLLBACK').catch(() => {});
       if (error.code === '23505') return response.status(409).json({ error: 'taken' });
       throw error;
+    } finally {
+      db.release();
     }
     return response.json({ username: name });
   }));
@@ -232,17 +262,24 @@ function registerSocialRoutes(router, { onFollow = async () => {} } = {}) {
     // Follower lists and requests show people by username: a follow from someone without one was counted (a request
     // dot) but could never be seen, accepted or declined.
     if (!mine.rows[0] || !mine.rows[0].username) return response.status(409).json({ error: 'username_required' });
+    // The block check is part of the insert: checked apart from it, a block made in between left the follow in place.
     const { rows } = await pool.query(
-      `INSERT INTO follows(follower_uid, followee_uid, status) VALUES ($1, $2, $3)
+      `INSERT INTO follows(follower_uid, followee_uid, status)
+       SELECT $1, $2, $3
+       WHERE NOT EXISTS (SELECT 1 FROM blocks WHERE (blocker_uid = $1 AND blocked_uid = $2)
+                                                OR (blocker_uid = $2 AND blocked_uid = $1))
        ON CONFLICT (follower_uid, followee_uid) DO NOTHING RETURNING status`,
       [me, target.uid, target.isPublic ? 'accepted' : 'pending'],
     );
     if (rows.length) {
-      // A new follow (not a repeat of one already there): the person hears about it.
-      await onFollow({ followerUid: me, followeeUid: target.uid, status: rows[0].status }).catch(() => {});
+      // A new follow (not a repeat of one already there): the person hears about it, without the reply waiting on
+      // the push service.
+      onFollow({ followerUid: me, followeeUid: target.uid, status: rows[0].status })
+        .catch((error) => console.error(`[social] follow push failed: ${error.message}`));
       return response.status(201).json({ status: rows[0].status });
     }
     const current = await relationBetween(pool, me, target.uid);
+    if (!current.following) return response.status(404).json({ error: 'not_found' }); // blocked meanwhile
     return response.json({ status: current.following });
   }));
 

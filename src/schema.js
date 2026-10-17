@@ -258,6 +258,21 @@ async function initializeDatabase() {
     ${addColumns('app_users', [['social_notifications', 'BOOLEAN NOT NULL DEFAULT TRUE']])}
     -- When the user asked for the account to be deleted (account-deletion.js); deleted 30 days later.
     ${addColumns('app_users', [['deletion_requested_at', 'TIMESTAMPTZ']])}
+    -- A username its owner just gave up stays theirs for 14 days (social.js): claimed by someone else at once, it
+    -- would receive the follows and links meant for the old owner. Deleted by the daily clean-up after that.
+    CREATE TABLE IF NOT EXISTS username_holds (
+      username TEXT PRIMARY KEY,
+      firebase_uid TEXT NOT NULL REFERENCES app_users(firebase_uid) ON DELETE CASCADE,
+      released_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    -- Username search is a prefix match on lower(username); this index serves it (the unique one does not, under
+    -- the database's en_US collation).
+    DO $$ BEGIN
+      IF to_regclass('app_users_username_prefix_idx') IS NULL THEN
+        CREATE INDEX app_users_username_prefix_idx ON app_users (lower(username) text_pattern_ops);
+      END IF;
+    END $$;
+
     CREATE TABLE IF NOT EXISTS follow_notices (
       follower_uid TEXT NOT NULL REFERENCES app_users(firebase_uid) ON DELETE CASCADE,
       followee_uid TEXT NOT NULL REFERENCES app_users(firebase_uid) ON DELETE CASCADE,

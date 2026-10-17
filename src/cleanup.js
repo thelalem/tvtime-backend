@@ -15,6 +15,7 @@ async function cleanUpOldRows(db = pool) {
         OR fetched_at < NOW() - INTERVAL '181 days'`,
   );
   await db.query("DELETE FROM rewatch_requests WHERE created_at < NOW() - INTERVAL '1 day'");
+  await db.query("DELETE FROM username_holds WHERE released_at < NOW() - INTERVAL '14 days'");
   const sent = await db.query(
     "DELETE FROM notifications_sent WHERE sent_at < NOW() - INTERVAL '30 days'",
   );

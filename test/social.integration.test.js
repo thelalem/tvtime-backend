@@ -116,7 +116,7 @@ test('username: a suggestion first, then check, claim, change, and the refusals'
   assert.deepEqual((await api(uid, 'GET', `/me/social/username/available?name=${name}`)).body.available, true, 'your own name is still yours');
   const renamed = `moved_${run}`.slice(0, 20);
   assert.equal((await api(uid, 'PUT', '/me/social/username', { username: renamed })).status, 200);
-  assert.equal((await api(other, 'PUT', '/me/social/username', { username: name })).status, 200, 'the old name is free again');
+  assert.equal((await api(other, 'PUT', '/me/social/username', { username: name })).status, 409, 'the old name is held for its owner for 14 days');
 });
 
 test('follow a public profile: accepted at once, counted, listed, idempotent, undone', async () => {
@@ -219,6 +219,22 @@ test('following needs a username of your own (a follow from someone without one 
   assert.equal(refused.body.error, 'username_required');
   const counts = (await api(pia.uid, 'GET', `/me/social/users/${pia.handle}`)).body;
   assert.equal(counts.followers, 0);
+});
+
+test("a username given up stays its owner's for 14 days; they can take it back", async () => {
+  const ava = await person('hld');
+  const bob = await person('clm');
+  const freed = ava.handle;
+  const renamed = `hld2_${run}`.slice(0, 20);
+  assert.equal((await api(ava.uid, 'PUT', '/me/social/username', { username: renamed })).status, 200);
+  assert.equal((await api(bob.uid, 'GET', `/me/social/username/available?name=${freed}`)).body.available, false);
+  assert.equal((await api(bob.uid, 'PUT', '/me/social/username', { username: freed })).status, 409);
+  assert.equal((await api(ava.uid, 'GET', `/me/social/username/available?name=${freed}`)).body.available, true);
+  assert.equal((await api(ava.uid, 'PUT', '/me/social/username', { username: freed })).status, 200, 'its owner takes it back');
+  // After 14 days it is free for anyone.
+  assert.equal((await api(ava.uid, 'PUT', '/me/social/username', { username: renamed })).status, 200);
+  await pool.query("UPDATE username_holds SET released_at = NOW() - INTERVAL '15 days' WHERE username = $1", [freed]);
+  assert.equal((await api(bob.uid, 'PUT', '/me/social/username', { username: freed })).status, 200);
 });
 
 test('compare counts every show, not only the most recent 300', async () => {
