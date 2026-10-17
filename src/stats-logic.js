@@ -184,6 +184,91 @@ function topNames(lists) {
     .map(([name, shows]) => ({ name, shows }));
 }
 
+// TMDB's movie genre ids (a fixed list), so the stats can name the genres a stored movie only holds ids for.
+const MOVIE_GENRES = {
+  28: 'Action', 12: 'Adventure', 16: 'Animation', 35: 'Comedy', 80: 'Crime', 99: 'Documentary', 18: 'Drama',
+  10751: 'Family', 14: 'Fantasy', 36: 'History', 27: 'Horror', 10402: 'Music', 9648: 'Mystery', 10749: 'Romance',
+  878: 'Science Fiction', 10770: 'TV Movie', 53: 'Thriller', 10752: 'War', 37: 'Western',
+};
+
+// The Movies half of the stats page: only watched movies (a date on them), their time, months, genres, decades and
+// the longest and shortest. A movie with no known runtime adds no minutes and is left out of the average and the
+// longest/shortest.
+function movieStatsFor(movies, today) {
+  const watched = movies.filter((movie) => /^\d{4}-\d{2}-\d{2}$/.test(movie.watchedOn || ''));
+  const withRuntime = watched.filter((movie) => Number.isFinite(movie.runtime) && movie.runtime > 0);
+  const minutes = withRuntime.reduce((sum, movie) => sum + movie.runtime, 0);
+
+  const byMonth = new Map();
+  for (const movie of watched) {
+    const key = movie.watchedOn.slice(0, 7);
+    if (!byMonth.has(key)) byMonth.set(key, { month: key, movies: 0, minutes: 0 });
+    const bucket = byMonth.get(key);
+    bucket.movies += 1;
+    bucket.minutes += Number.isFinite(movie.runtime) && movie.runtime > 0 ? movie.runtime : 0;
+  }
+  const monthList = [...byMonth.values()].sort((a, b) => a.month.localeCompare(b.month));
+  const months = [];
+  for (let i = 0; i < monthList.length; i += 1) {
+    months.push(monthList[i]);
+    const next = monthList[i + 1];
+    if (!next) break;
+    let [y, m] = monthList[i].month.split('-').map(Number);
+    for (;;) {
+      m += 1;
+      if (m > 12) { m = 1; y += 1; }
+      const key = `${y}-${String(m).padStart(2, '0')}`;
+      if (key >= next.month) break;
+      months.push({ month: key, movies: 0, minutes: 0 });
+    }
+  }
+  const busiestMonth = months.reduce((best, item) => (item.movies > (best ? best.movies : 0) ? item : best), null);
+
+  const genreCounts = new Map();
+  const decadeCounts = new Map();
+  for (const movie of watched) {
+    for (const id of new Set(movie.genreIds || [])) {
+      const name = MOVIE_GENRES[id];
+      if (name) genreCounts.set(name, (genreCounts.get(name) || 0) + 1);
+    }
+    const year = Number.parseInt(String(movie.releaseDate || '').slice(0, 4), 10);
+    if (Number.isInteger(year) && year >= 1880) {
+      const decade = Math.floor(year / 10) * 10;
+      decadeCounts.set(decade, (decadeCounts.get(decade) || 0) + 1);
+    }
+  }
+  const genres = [...genreCounts.entries()]
+    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+    .slice(0, TOP_COUNT)
+    .map(([name, count]) => ({ name, movies: count }));
+  const decades = [...decadeCounts.entries()]
+    .sort((a, b) => a[0] - b[0])
+    .map(([decade, count]) => ({ decade, movies: count }));
+
+  const card = (movie) => (movie ? {
+    movieId: movie.movieId, title: movie.title, posterPath: movie.posterPath || null,
+    runtime: movie.runtime, date: movie.watchedOn,
+  } : null);
+  const byLength = [...withRuntime].sort((a, b) => a.runtime - b.runtime || a.title.localeCompare(b.title));
+  const thisYear = today.slice(0, 4);
+  const dates = watched.map((movie) => movie.watchedOn).sort();
+  return {
+    watched: watched.length,
+    minutes,
+    averageRuntime: withRuntime.length ? Math.round(minutes / withRuntime.length) : 0,
+    thisYear: watched.filter((movie) => movie.watchedOn.startsWith(thisYear)).length,
+    unknownRuntime: watched.length - withRuntime.length,
+    months,
+    busiestMonth: busiestMonth && busiestMonth.movies > 0 ? busiestMonth : null,
+    genres,
+    decades,
+    longest: card(byLength[byLength.length - 1]),
+    shortest: card(byLength[0]),
+    firstDate: dates[0] || null,
+    latestDate: dates[dates.length - 1] || null,
+  };
+}
+
 function computeStats({
   shows = [], movies = [], timezone = 'UTC', now = new Date(), library = null, ratings = null,
 } = {}) {
@@ -381,9 +466,10 @@ function computeStats({
       catchUpDate: daysToCatchUp !== null && daysToCatchUp < 36500 ? addDays(today, daysToCatchUp) : null,
       unknownShows,
     },
+    movieStats: movieStatsFor(movies, today),
     library,
     ratings,
   };
 }
 
-module.exports = { BULK_LIMIT, FALLBACK_RUNTIME, addDays, computeStats, dayOf, nextDay, weekStart };
+module.exports = { MOVIE_GENRES, BULK_LIMIT, FALLBACK_RUNTIME, addDays, computeStats, dayOf, nextDay, weekStart };

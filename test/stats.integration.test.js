@@ -199,3 +199,29 @@ test('stats: two looks at the same person at once share one calculation', async 
   const [first, second] = await Promise.all([loadStats(uid), loadStats(uid)]);
   assert.equal(first, second, 'the same answer object, worked out once');
 });
+
+test('stats: the movie section reads genres, release years and posters from the stored movies', async () => {
+  const uid = newUser();
+  await pool.query('INSERT INTO app_users(firebase_uid) VALUES ($1) ON CONFLICT DO NOTHING', [uid]);
+  const insert = (id, movie, watchedOn) => pool.query(
+    `INSERT INTO movie_watchlist(firebase_uid, movie_id, movie, watched_on) VALUES ($1, $2, $3::jsonb, $4)`,
+    [uid, id, JSON.stringify(movie), watchedOn],
+  );
+  await insert(1, { title: 'Heat', runtime: 170, poster_path: '/heat.jpg', release_date: '1995-12-15', genre_ids: [28, 80] }, '2026-05-11');
+  await insert(2, { title: 'Up', runtime: 96, poster_path: '/up.jpg', release_date: '2009-05-29', genre_ids: [16, 35] }, '2026-06-02');
+  await insert(3, { title: 'Unseen', runtime: 100, release_date: '2020-01-01', genre_ids: [18] }, null);
+  await insert(4, { title: 'Bare' }, '2026-06-03'); // no runtime, no genres, no date of release
+
+  const { status, body } = await api(uid, 'GET', '/me/stats');
+  assert.equal(status, 200);
+  const movies = body.movieStats;
+  assert.equal(movies.watched, 3, 'a movie that was not watched is left out');
+  assert.equal(movies.minutes, 266);
+  assert.equal(movies.unknownRuntime, 1);
+  assert.equal(movies.longest.title, 'Heat');
+  assert.equal(movies.longest.posterPath, '/heat.jpg');
+  assert.equal(movies.shortest.title, 'Up');
+  assert.deepEqual(movies.decades, [{ decade: 1990, movies: 1 }, { decade: 2000, movies: 1 }]);
+  assert.deepEqual(movies.genres.map((genre) => genre.name).sort(), ['Action', 'Animation', 'Comedy', 'Crime']);
+  assert.deepEqual(movies.months.map((month) => [month.month, month.movies]), [['2026-05', 1], ['2026-06', 2]]);
+});

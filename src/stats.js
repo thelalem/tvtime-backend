@@ -128,6 +128,8 @@ async function computeFor(uid, now) {
     ),
     pool.query(
       `SELECT movie_id, movie->>'title' AS title, (movie->>'runtime')::int AS runtime,
+              movie->>'poster_path' AS "posterPath", movie->>'release_date' AS "releaseDate",
+              movie->'genre_ids' AS "genreIds",
               to_char(watched_on, 'YYYY-MM-DD') AS "watchedOn"
        FROM movie_watchlist WHERE firebase_uid = $1 AND watched_on IS NOT NULL`,
       [uid],
@@ -182,6 +184,8 @@ async function computeFor(uid, now) {
       shows,
       movies: movies.rows.map((row) => ({
         movieId: Number(row.movie_id), title: row.title || 'Movie', watchedOn: row.watchedOn, runtime: row.runtime,
+        posterPath: row.posterPath || null, releaseDate: row.releaseDate || '',
+        genreIds: Array.isArray(row.genreIds) ? row.genreIds.filter(Number.isInteger) : [],
       })),
       timezone: (user.rows[0] && user.rows[0].timezone) || 'UTC',
       now,
