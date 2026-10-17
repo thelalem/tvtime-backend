@@ -114,6 +114,10 @@ function materialText(material) {
   ].join('\n')).join('\n\n');
 }
 
+// The model writes from what it knows of the show (decided with the user: TMDB's synopses are pre-air teasers
+// that never say how an episode turned out, so recaps from them alone were thin). The synopses keep the order
+// and the episode boundaries straight. The cutoff is the last thing in the prompt, so it is what the model
+// reads last; "if you do not know the show, stick to the descriptions" guards against invented recaps.
 function buildPrompt(showName, cutoff, scope, material) {
   const detail = 'Follow the main storylines in order, name the characters involved and the turning points, so ' +
     'the viewer can pick up straight away.';
@@ -124,22 +128,30 @@ function buildPrompt(showName, cutoff, scope, material) {
       ? `Write a detailed recap of season ${cutoff.season - 1}, the season before the one they are in, in about ` +
         `250 to 400 words. ${detail} End with how that season ended.`
       : `Write a detailed recap of season ${cutoff.season} up to episode ${cutoff.episode}, in about 250 to 400 ` +
-        `words. ${detail}`;
-  const ending = scope === 'last'
-    ? 'Do not mention anything after that season.'
-    : 'End with where the last watched episode left off, so they know where they are.';
+        `words. ${detail} End with where episode ${cutoff.episode} left off, so they know where they are.`;
+  const lastSeason = scope === 'last' ? cutoff.season - 1 : null;
+  const lastEpisode = lastSeason === null
+    ? material.find((season) => season.season === cutoff.season)?.episodes.find((e) => e.number === cutoff.episode)
+    : null;
+  const stop = lastSeason !== null
+    ? `the last episode of season ${lastSeason}`
+    : `season ${cutoff.season}, episode ${cutoff.episode}${lastEpisode && lastEpisode.name ? ` ("${lastEpisode.name}")` : ''}`;
   return [
     `Write a "previously on" recap of the TV show "${showName}" for a viewer who has watched up to ` +
       `season ${cutoff.season}, episode ${cutoff.episode} and is coming back after a break.`,
     shape,
-    ending,
-    'Use only the episode descriptions below. Do not add events, characters or details that are not in them, ' +
-      'and never hint at what happens later. If the descriptions are thin, keep the recap short rather than ' +
-      'filling gaps.',
+    'Draw on what you know about the show itself: what actually happened in each episode, who did what, and ' +
+      'how the storylines turned out. The episode descriptions below are short pre-air teasers; use them to keep ' +
+      'the order and the episode boundaries right, not as the limit of what you can say.',
+    'If you do not know this show well, stick to the descriptions and keep it short rather than inventing anything.',
     'Write in English, in plain text: short paragraphs, no headings, no lists, no markdown.',
     '',
     'Episode descriptions:',
     materialText(material),
+    '',
+    `FINAL RULE, the most important one: include everything up to and including ${stop}, and not a single ` +
+      'thing after it. Do not mention, hint at or foreshadow anything that happens later: no later twists, ' +
+      'reveals, deaths, character fates, relationships or seasons, even if you know them.',
   ].join('\n');
 }
 
@@ -333,8 +345,8 @@ function registerRecapRoutes(router) {
       if (scope === 'last' && cutoff.season < 2) return response.status(404).json({ error: 'no_last_season' });
       const showName = rows[0].show_name || 'this show';
 
-      // v3: v1 recaps could be cut off mid-sentence (see askGemini); v2 had shorter season recaps.
-      const key = `recap:v3:${seriesId}:${scope}:S${cutoff.season}E${cutoff.episode}`;
+      // v4: v1 could be cut off mid-sentence (see askGemini); v2 had shorter season recaps; v3 used only the synopses.
+      const key = `recap:v4:${seriesId}:${scope}:S${cutoff.season}E${cutoff.episode}`;
       let material = null;
       const answer = { season: cutoff.season, episode: cutoff.episode, scope };
       try {

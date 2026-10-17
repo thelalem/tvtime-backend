@@ -152,6 +152,11 @@ test('material stops at the cutoff; only finished seasons give their overview; T
   const prompt = recap.buildPrompt('The Show', cutoff, 'all', all);
   assert.ok(!prompt.includes('SPOILER'));
   assert.match(prompt, /season 2, episode 2/);
+  const lines = prompt.trim().split('\n');
+  assert.match(lines[lines.length - 1], /^FINAL RULE.*up to and including season 2, episode 2 \("Two 2"\), and not a single/,
+    'the cutoff is the last thing the model reads');
+  assert.match(prompt, /Draw on what you know about the show/);
+  assert.match(recap.buildPrompt('The Show', cutoff, 'last', all), /up to and including the last episode of season 1/);
 });
 
 test('Gemini writes it from the synopses up to the user\'s episode; the answer is cached and shared', async () => {
