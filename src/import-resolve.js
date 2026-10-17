@@ -20,6 +20,23 @@ const MAX_IDS = 200;
 const MAX_SEARCH = 50;
 const MAX_EPISODES = 200;
 const CONCURRENCY = 5;
+// For every import at once, not per request: the app sends up to three requests at a time, and their lookups share
+// TMDB's slots (tmdb.js) with everyone's show pages. A cold import is about 1,300 lookups; IMPORT_SLOTS at a time keeps it
+// from crowding those out. A lookup already cached waits its turn too, but that turn is short.
+const IMPORT_SLOTS = 3;
+let importSlotsInUse = 0;
+const waitingForSlot = [];
+async function withImportSlot(lookup) {
+  if (importSlotsInUse >= IMPORT_SLOTS) await new Promise((resolve) => waitingForSlot.push(resolve));
+  else importSlotsInUse += 1;
+  try {
+    return await lookup();
+  } finally {
+    const next = waitingForSlot.shift();
+    if (next) next(); // the slot passes straight on
+    else importSlotsInUse -= 1;
+  }
+}
 const IMDB_ID = /^tt\d{1,10}$/;
 
 function cleanIds(value, valid, max = MAX_IDS) {
@@ -56,13 +73,13 @@ async function resolveAll(jobs) {
     while (queue.length) {
       const job = queue.shift();
       try {
-        job.result = job.search && job.kind === 'tv'
-          ? await findShowByTitle(job.search.title)
+        job.result = await withImportSlot(() => (job.search && job.kind === 'tv'
+          ? findShowByTitle(job.search.title)
           : job.search
-          ? await findMovieByTitle(job.search.title, { year: job.search.year, before: job.search.before })
+          ? findMovieByTitle(job.search.title, { year: job.search.year, before: job.search.before })
           : job.kind === 'episode'
-            ? await findEpisodeByTvdbId(job.id)
-            : await findTmdbId(job.kind, job.id);
+            ? findEpisodeByTvdbId(job.id)
+            : findTmdbId(job.kind, job.id)));
       } catch (error) {
         job.failed = true;
       }

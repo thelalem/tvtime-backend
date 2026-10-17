@@ -4,6 +4,7 @@ const Module = require('node:module');
 
 const lookups = [];
 let failFor = null;
+let instead = null; // a test's own lookup
 const stub = {
   findEpisodeByTvdbId: async (id) => {
     lookups.push(`episode:${id}`);
@@ -19,6 +20,7 @@ const stub = {
     return title === 'Prison Break' ? 2288 : null;
   },
   findTmdbId: async (kind, id) => {
+    if (instead) return instead(kind, id);
     lookups.push(`${kind}:${id}`);
     if (id === failFor) throw new Error('TMDB down');
     if (id === '999' || id === 'tt0999999') return null;
@@ -120,4 +122,24 @@ test('searchTv finds a show by its title when its TVDB id is unknown', async () 
   assert.deepEqual(payload.searchTv, { 75340: 2288, 1: null });
   assert.deepEqual(lookups, ['tv-title:Prison Break', 'tv-title:Nope']);
   assert.equal((await call({ searchTv: [{ key: '', title: 'x' }] })).status, 400);
+});
+
+test('lookups from several imports at once run at most three at a time', async () => {
+  let running = 0;
+  let most = 0;
+  instead = async (kind, id) => {
+    running += 1;
+    most = Math.max(most, running);
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    running -= 1;
+    return Number(id) + 1000;
+  };
+  try {
+    const ids = (from) => Array.from({ length: 20 }, (_, i) => from + i);
+    const answers = await Promise.all([call({ tvdb: ids(1) }), call({ tvdb: ids(101) }), call({ tvdb: ids(201) })]);
+    assert.equal(most, 3);
+    assert.equal(answers[2].payload.tvdb['201'], 1201);
+  } finally {
+    instead = null;
+  }
 });
