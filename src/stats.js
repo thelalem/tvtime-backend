@@ -3,7 +3,7 @@
 // what the social page (section 19) will call for another person, so the numbers match on both sides.
 const { pool } = require('./db');
 const { readThrough } = require('./persistent-cache');
-const { getTvShowClassificationData } = require('./tmdb');
+const { getTvSeason, getTvShowClassificationData } = require('./tmdb');
 const { computeStats } = require('./stats-logic');
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -14,16 +14,33 @@ const CACHE_MS = 60 * 1000;
 
 const cache = new Map(); // uid -> { at, data }
 
-// A show's episode runtime in minutes (TMDB's first `episode_run_time`, or its latest episode's), `null` when TMDB has
-// none (the 42-minute fallback applies), `undefined` when the lookup failed and should be tried again next time.
+// The median of a list of numbers (the middle one, or the mean of the two middle ones).
+function median(values) {
+  const sorted = [...values].sort((a, b) => a - b);
+  const mid = Math.floor(sorted.length / 2);
+  return sorted.length % 2 ? sorted[mid] : Math.round((sorted[mid - 1] + sorted[mid]) / 2);
+}
+
+// A show's usual episode length in minutes: TMDB's `episode_run_time` when it has one. Many shows have none (the field
+// is deprecated), and the length of the latest episode is no stand-in (a series finale can run twice as long), so then
+// it is the median of the first season's episode lengths. `null` when neither exists (the 42-minute fallback applies),
+// `undefined` when the lookup failed and should be tried again next time.
 async function showRuntime(showId) {
   try {
-    return await readThrough(`runtime:tv:${showId}`, RUNTIME_TTL_MS, async () => {
+    // v2: the first version used the last episode's length, which finales skewed; those answers must not be reused.
+    return await readThrough(`runtime:tv:v2:${showId}`, RUNTIME_TTL_MS, async () => {
       const data = await getTvShowClassificationData(showId);
       const list = data && data.episode_run_time;
-      const runtime = Array.isArray(list) && list.length ? list[0]
-        : data && data.last_episode_to_air && data.last_episode_to_air.runtime;
-      return Number.isFinite(runtime) && runtime > 0 ? runtime : null;
+      if (Array.isArray(list) && list.length && Number.isFinite(list[0]) && list[0] > 0) return list[0];
+      const seasons = ((data && data.seasons) || [])
+        .filter((season) => Number.isInteger(season.season_number) && season.season_number > 0 && season.episode_count > 0)
+        .sort((a, b) => a.season_number - b.season_number);
+      if (!seasons.length) return null;
+      const season = await getTvSeason(showId, seasons[0].season_number);
+      const lengths = ((season && season.episodes) || [])
+        .map((episode) => episode.runtime)
+        .filter((runtime) => Number.isFinite(runtime) && runtime > 0);
+      return lengths.length ? median(lengths) : null;
     }, { emptyTtlMs: DAY_MS });
   } catch (error) {
     return undefined;

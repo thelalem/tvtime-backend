@@ -12,14 +12,20 @@ if (!url) {
 process.env.DATABASE_URL = url;
 
 const SLOW_SHOW = 9202;
+const NO_RUNTIME_SHOW = 9203;
 const stubs = {
   './firebase': {
     admin: { auth: () => ({ verifyIdToken: async (token) => ({ uid: token, email: `${token}@example.test` }) }) },
   },
   './tmdb': {
-    getTvSeason: async () => ({ season_number: 1, episodes: [] }),
+    getTvSeason: async () => ({ season_number: 1, episodes: [{ runtime: 20 }, { runtime: 22 }, { runtime: 22 }, { runtime: 90 }, { runtime: null }] }),
     getTvShowClassificationData: async (id) => {
       if (Number(id) === SLOW_SHOW) throw new Error('TMDB is down');
+      if (Number(id) === NO_RUNTIME_SHOW) {
+        // No usable episode_run_time; the last episode (a long finale) must not be taken for the usual length.
+        return { seasons: [{ season_number: 0, episode_count: 3 }, { season_number: 1, episode_count: 5 }],
+          episode_run_time: [], last_episode_to_air: { runtime: 90 } };
+      }
       return { seasons: [], status: 'Ended', episode_run_time: [30] };
     },
   },
@@ -120,4 +126,15 @@ test('stats: a new account has empty stats, and the route needs sign-in', async 
   assert.equal(body.biggestBinge, null);
   const anonymous = await fetch(`${base}/api/v1/me/stats`);
   assert.equal(anonymous.status, 401);
+});
+
+test('stats: a show with no episode_run_time uses the median of its first season, not a long finale', async () => {
+  const uid = newUser();
+  assert.equal((await imported(uid, NO_RUNTIME_SHOW, [
+    { key: 'S1E1', watched: true, at: '2026-05-10T10:00:00Z' },
+    { key: 'S1E2', watched: true, at: '2026-05-11T10:00:00Z' },
+  ])).status, 200);
+  const { body } = await api(uid, 'GET', '/me/stats');
+  assert.equal(body.totals.minutes.episodes, 2 * 22, 'median of 20, 22, 22, 90 is 22');
+  assert.equal(body.approximate, false);
 });
