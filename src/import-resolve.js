@@ -1,4 +1,4 @@
-const { findEpisodeByTvdbId, findMovieByTitle, findTmdbId } = require('./tmdb');
+const { findEpisodeByTvdbId, findMovieByTitle, findShowByTitle, findTmdbId } = require('./tmdb');
 
 // Import from TV Time (FEATURE_PLAN.md section 16). TV Time's export carries TVDB ids (shows) and IMDb ids
 // (movies); the app works in TMDB ids. This route turns the first into the second, through TMDB's /find,
@@ -6,11 +6,13 @@ const { findEpisodeByTvdbId, findMovieByTitle, findTmdbId } = require('./tmdb');
 //
 //   POST /me/import/resolve  { tvdb: [81189, ...], imdb: ["tt0163025", ...],
 //                              search: [{ key: "uuid", title: "My Oxford Year", year: 2025, before: "2025-08-20" }],
-//                              episodes: [10736237, ...] }
+//                              episodes: [10736237, ...], searchTv: [{ key: "75340", title: "Prison Break" }] }
 //   -> { tvdb: { "81189": 1396, "5": null }, imdb: { "tt0163025": 331 }, search: { "tt32641187": 1307078 },
-//        episodes: { "10736237": { show: 281666, season: 1, episode: 1 }, "7": null }, failed: ["tvdb:77"] }
+//        episodes: { "10736237": { show: 281666, season: 1, episode: 1 }, "7": null }, searchTv: { "75340": 2288 },
+//        failed: ["tvdb:77"] }
 // `episodes` are TVDB episode ids, answered with where TMDB has the episode (its show, season and number),
 // which is exact even when the numbering differs. `search` is for movies whose IMDb id TMDB does not know: matched by exact title and release year (or, with no year, by title alone when that is unambiguous).
+// `searchTv` is for shows whose TVDB id TMDB does not know: one show of exactly that name.
 //
 // `null` means TMDB does not know the id (final for now). An id the lookup failed on (TMDB down) is left
 // out of the maps and named in `failed`, so the app asks again for just those.
@@ -54,7 +56,9 @@ async function resolveAll(jobs) {
     while (queue.length) {
       const job = queue.shift();
       try {
-        job.result = job.search
+        job.result = job.search && job.kind === 'tv'
+          ? await findShowByTitle(job.search.title)
+          : job.search
           ? await findMovieByTitle(job.search.title, { year: job.search.year, before: job.search.before })
           : job.kind === 'episode'
             ? await findEpisodeByTvdbId(job.id)
@@ -75,17 +79,19 @@ function registerImportResolveRoute(router) {
       const imdb = cleanIds(body.imdb, (id) => IMDB_ID.test(id));
       const search = cleanSearch(body.search);
       const episodes = cleanIds(body.episodes, (id) => /^\d{1,10}$/.test(id) && Number(id) > 0, MAX_EPISODES);
-      if (!tvdb || !imdb || !search || !episodes) return response.status(400).json({ error: 'invalid_ids' });
+      const searchTv = cleanSearch(body.searchTv);
+      if (!tvdb || !imdb || !search || !episodes || !searchTv) return response.status(400).json({ error: 'invalid_ids' });
 
       const jobs = [
         ...tvdb.map((id) => ({ kind: 'tv', id, group: 'tvdb' })),
         ...imdb.map((id) => ({ kind: 'movie', id, group: 'imdb' })),
         ...episodes.map((id) => ({ kind: 'episode', id, group: 'episodes' })),
         ...search.map((item) => ({ kind: 'movie', id: item.key, group: 'search', search: item })),
+        ...searchTv.map((item) => ({ kind: 'tv', id: item.key, group: 'searchTv', search: item })),
       ];
       await resolveAll(jobs);
 
-      const answer = { tvdb: {}, imdb: {}, search: {}, episodes: {}, failed: [] };
+      const answer = { tvdb: {}, imdb: {}, search: {}, searchTv: {}, episodes: {}, failed: [] };
       for (const job of jobs) {
         if (job.failed) answer.failed.push(`${job.group}:${job.id}`);
         else answer[job.group][job.id] = job.result;

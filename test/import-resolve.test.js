@@ -14,6 +14,10 @@ const stub = {
     lookups.push(`title:${title}:${year}`);
     return title === 'My Oxford Year' ? 1307078 : null;
   },
+  findShowByTitle: async (title) => {
+    lookups.push(`tv-title:${title}`);
+    return title === 'Prison Break' ? 2288 : null;
+  },
   findTmdbId: async (kind, id) => {
     lookups.push(`${kind}:${id}`);
     if (id === failFor) throw new Error('TMDB down');
@@ -107,5 +111,13 @@ test('episodes are placed by TVDB episode id: show, season and number, or null',
 
 test('an empty request answers empty maps', async () => {
   const { payload } = await call({});
-  assert.deepEqual(payload, { tvdb: {}, imdb: {}, search: {}, episodes: {}, failed: [] });
+  assert.deepEqual(payload, { tvdb: {}, imdb: {}, search: {}, searchTv: {}, episodes: {}, failed: [] });
+});
+
+test('searchTv finds a show by its title when its TVDB id is unknown', async () => {
+  const { status, payload } = await call({ searchTv: [{ key: '75340', title: 'Prison Break' }, { key: '1', title: 'Nope' }] });
+  assert.equal(status, 200);
+  assert.deepEqual(payload.searchTv, { 75340: 2288, 1: null });
+  assert.deepEqual(lookups, ['tv-title:Prison Break', 'tv-title:Nope']);
+  assert.equal((await call({ searchTv: [{ key: '', title: 'x' }] })).status, 400);
 });

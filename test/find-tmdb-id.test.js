@@ -44,7 +44,7 @@ undici.fetch = async (url) => {
     }),
   };
 };
-const { findEpisodeByTvdbId, findMovieByTitle, findTmdbId, pickMovieByTitle } = require('../src/tmdb');
+const { findEpisodeByTvdbId, findMovieByTitle, findTmdbId, pickMovieByTitle, pickShowByTitle } = require('../src/tmdb');
 
 test('finds a show by TVDB id and a movie by IMDb id, asking TMDB once each', async () => {
   assert.equal(await findTmdbId('tv', '81189'), 1396);
@@ -92,4 +92,30 @@ test('titles in another language match the original title; accents and punctuati
   assert.equal(pickMovieByTitle(wandering, '流浪地球'), 40);
   assert.equal(pickMovieByTitle([movie(41, 'Amélie', '2001-04-25', 9000)], 'Amelie', { year: 2001 }), 41);
   assert.equal(pickMovieByTitle([movie(42, "F*ck Valentine's Day", '2019-02-14', 40)], 'F*ck Valentines Day'), 42);
+});
+
+test('no exact title: the search result of that year (or out by the watch day), if it is the only one or dominates', () => {
+  assert.equal(pickMovieByTitle([movie(50, "National Lampoon's Van Wilder", '2002-04-05', 900)], 'Van Wilder', { year: 2002 }), 50);
+  assert.equal(pickMovieByTitle([movie(51, 'Thunderbolts*', '2025-04-30', 3000)], 'Thunderbolts*: *The New Avengers', { year: 2025 }), 51);
+  assert.equal(pickMovieByTitle([
+    movie(52, 'The Fantastic 4: First Steps', '2025-07-23', 2500),
+    movie(53, 'Marvel Studios\' The Fantastic Four: First Steps - World Premiere', '2025-07-21', 3),
+  ], 'The Fantastic Four: First Steps', { year: 2025 }), 52, 'the film dominates its premiere special');
+  assert.equal(pickMovieByTitle([movie(54, 'Wish Dragon', '2021-01-15', 400)], '许愿神龙', { before: '2022-01-01' }), 54);
+  assert.equal(pickMovieByTitle([movie(54, 'Wish Dragon', '2021-01-15', 400)], '许愿神龙'), null, 'no year and no watch day: too vague');
+  assert.equal(pickMovieByTitle([movie(55, 'Some Film', '2001-01-01', 400)], 'Other Film', { year: 2020 }), null, 'not that year');
+  assert.equal(pickMovieByTitle([movie(56, 'A', '2020-01-01', 400), movie(57, 'B', '2020-01-01', 300)], 'Something', { year: 2020 }), null, 'two close');
+  assert.equal(pickMovieByTitle([movie(58, 'Up', '2009-05-28', 9000)], 'Upp', { year: 2009 }), null, 'too short to trust');
+  assert.equal(pickMovieByTitle([
+    movie(59, "Charlie's Angels", '2000-11-02', 4600), movie(60, "Charlie's Angels", '2000-01-01', 4000),
+  ], "Charlie's Angels", { before: '2010-01-01' }), null, 'exact but ambiguous titles are not handed to the fallback');
+});
+
+test('a show by title: one exact name (or a dominant one), never a lookalike', () => {
+  const show = (id, name, votes) => ({ id, name, original_name: name, vote_count: votes });
+  assert.equal(pickShowByTitle([show(2288, 'Prison Break', 3000), show(303464, 'Prison Break: Black Creek', 0)], 'Prison Break'), 2288);
+  assert.equal(pickShowByTitle([show(272059, 'TO BE HERO X', 90), show(68135, 'To Be Hero', 40)], 'To Be Hero X'), 272059);
+  assert.equal(pickShowByTitle([show(95594, 'Fast & Furious Spy Racers', 200)], 'The Fast and the Furious'), null);
+  assert.equal(pickShowByTitle([show(1, 'Shameless', 3000), show(2, 'Shameless', 400)], 'Shameless'), 1, 'US dominates UK');
+  assert.equal(pickShowByTitle([show(1, 'The Office', 3000), show(2, 'The Office', 2000)], 'The Office'), null, 'too close');
 });

@@ -604,19 +604,59 @@ function pickMovieByTitle(results, title, { year = null, before = null } = {}) {
   const wanted = plainTitle(title);
   if (!wanted) return null;
   const released = (movie) => Number.parseInt(String(movie.release_date || '').slice(0, 4), 10);
-  let candidates = (results || []).filter((movie) =>
+  const inTime = (movie) => Number.isInteger(year)
+    ? Number.isInteger(released(movie)) && Math.abs(released(movie) - year) <= 1
+    : !before || (movie.release_date && String(movie.release_date) <= before);
+  const exact = (results || []).filter((movie) =>
     [movie.title, movie.original_title].some((name) => plainTitle(name) === wanted));
   if (Number.isInteger(year)) {
-    candidates = candidates.filter((movie) => Number.isInteger(released(movie)) && Math.abs(released(movie) - year) <= 1);
-    return candidates.length ? candidates[0].id : null;
+    const inYear = exact.filter(inTime);
+    if (inYear.length) return inYear[0].id;
+  } else {
+    const picked = dominant(exact.filter(inTime));
+    if (picked !== undefined) return picked;
   }
-  if (before) {
-    candidates = candidates.filter((movie) => movie.release_date && String(movie.release_date) <= before);
-  }
-  if (candidates.length <= 1) return candidates.length ? candidates[0].id : null;
-  const byVotes = [...candidates].sort((a, b) => (b.vote_count || 0) - (a.vote_count || 0));
-  const [top, next] = byVotes;
+  // No exact title: what TMDB's own search found for that year (or released by the day it was watched),
+  // when that is a single movie or one that clearly dominates. TV Time keeps some titles its own way
+  // ("Thunderbolts*: *The New Avengers", "Van Wilder" for "National Lampoon's Van Wilder", a Chinese title
+  // for "Wish Dragon"). Short titles are too vague for this.
+  if (wanted.length < 4 || (!Number.isInteger(year) && !before)) return null;
+  return dominant((results || []).filter(inTime)) ?? null;
+}
+
+// The one movie or show of [items], or the best-known when it has three times the votes of the next (and
+// at least 20); null when several are close; undefined when there are none.
+function dominant(items) {
+  if (!items.length) return undefined;
+  if (items.length === 1) return items[0].id;
+  const [top, next] = [...items].sort((a, b) => (b.vote_count || 0) - (a.vote_count || 0));
   return (top.vote_count || 0) >= 20 && (top.vote_count || 0) >= 3 * (next.vote_count || 0) ? top.id : null;
+}
+
+// Which TV search result is the show the title names: exact title only (name or original name, case,
+// accents and punctuation aside), and only one such show, or one that clearly dominates.
+function pickShowByTitle(results, title) {
+  const wanted = plainTitle(title);
+  if (!wanted) return null;
+  const exact = (results || []).filter((show) =>
+    [show.name, show.original_name].some((name) => plainTitle(name) === wanted));
+  return dominant(exact) ?? null;
+}
+
+// The TMDB show for a title whose TVDB id TMDB does not know (TV Time's ids for a show TVDB re-filed, or a
+// new show TMDB has no TVDB id for yet). See pickShowByTitle. Cached in PostgreSQL.
+function findShowByTitle(title) {
+  const wanted = plainTitle(title);
+  if (!wanted) return Promise.resolve(null);
+  return readThrough(
+    `find:title-tv:${wanted}`,
+    imdbIdCacheTtlMs,
+    async () => {
+      const found = await tmdbGet('/search/tv', { query: String(title).slice(0, 200) });
+      return pickShowByTitle(found && found.results, title);
+    },
+    { emptyTtlMs: emptyAnswerTtlMs },
+  );
 }
 
 // The TMDB movie for a title the id lookup cannot find (TV Time's data carries no IMDb or TMDB id for
@@ -627,7 +667,8 @@ function findMovieByTitle(title, { year = null, before = null } = {}) {
   const day = typeof before === 'string' && /^\d{4}-\d{2}-\d{2}/.test(before) ? before.slice(0, 10) : null;
   if (!wanted) return Promise.resolve(null);
   return readThrough(
-    `find:title-movie:${wanted}:${wantedYear ?? 'any'}:${wantedYear === null && day ? day.slice(0, 7) : ''}`,
+    // v2: the search-result fallback came later; older "not found" answers must not stand in for it.
+    `find:title-movie-v2:${wanted}:${wantedYear ?? 'any'}:${wantedYear === null && day ? day.slice(0, 7) : ''}`,
     imdbIdCacheTtlMs,
     async () => {
       const found = await tmdbGet('/search/movie', {
@@ -830,6 +871,8 @@ module.exports = {
   findTmdbId,
   findMovieByTitle,
   pickMovieByTitle,
+  findShowByTitle,
+  pickShowByTitle,
   findEpisodeByTvdbId,
   getCollection,
   getMovie,
