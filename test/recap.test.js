@@ -12,6 +12,9 @@ function reset() {
     geminiStatus: 200,
     budgetLeft: 100,
     finishReason: 'STOP',
+    geminiHeaders: null,
+    geminiErrorBody: '',
+    geminiHangs: false,
     groqCalls: [],
     groqStatus: 200,
   });
@@ -60,11 +63,18 @@ const stubs = {
         };
       }
       state.geminiCalls.push({ url, body: JSON.parse(options.body), key: options.headers['x-goog-api-key'] });
+      if (state.geminiHangs) {
+        // Answers only when cut off by the request's own time limit.
+        return new Promise((_resolve, reject) => {
+          options.signal.addEventListener('abort', () => reject(new Error('aborted')));
+        });
+      }
       const status = String(url).includes('lite-test') && state.liteStatus ? state.liteStatus : state.geminiStatus;
       return {
         status,
         ok: status === 200,
-        text: async () => 'nope',
+        headers: { get: (name) => (state.geminiHeaders || {})[name.toLowerCase()] ?? null },
+        text: async () => state.geminiErrorBody || 'nope',
         json: async () => ({ candidates: [{ finishReason: state.finishReason, content: { parts: [{ text: 'thinking', thought: true }, { text: 'Previously on The Show...' }] } }] }),
       };
     },
@@ -101,6 +111,8 @@ test.beforeEach(() => {
   config.groqApiKey = '';
   config.groqModel = 'groq-test';
   config.groqBaseUrl = 'https://groq.test/openai/v1';
+  config.recapAdminUids = ['l2', 'g4', 'f4']; // the accounts the writer=... checks below use
+  recap._setTotalBudget(90 * 1000);
 });
 
 test('Gemini Flash-Lite writes it when Flash is out of quota, before Groq is asked', async () => {
@@ -311,4 +323,79 @@ test('running out of quota is not remembered as a failure', async () => {
   recap._resetLimits();
   await call({ scope: 'season' }, 'q2');
   assert.equal(recap._failedRecaps(), 1, 'a cut-off answer is');
+});
+
+test('a per-minute 429 pauses a writer for the wait it asks for (at least a minute); a daily one for half an hour', async () => {
+  state.geminiStatus = 429;
+  state.liteStatus = 200;
+  state.geminiHeaders = { 'retry-after': '20' };
+  await call({ scope: 'season' }, 'r1');
+  const minute = recap._pausedFor('gemini');
+  assert.ok(minute > 50 * 1000 && minute <= 60 * 1000, `about a minute, was ${minute}`);
+
+  recap._resetLimits();
+  state.cache.clear();
+  state.geminiHeaders = null;
+  state.geminiErrorBody = '{"error":{"details":[{"retryDelay":"300s"}]}}';
+  await call({ scope: 'season' }, 'r2');
+  const fiveMinutes = recap._pausedFor('gemini');
+  assert.ok(fiveMinutes > 290 * 1000 && fiveMinutes <= 300 * 1000, `Gemini's RetryInfo, was ${fiveMinutes}`);
+
+  recap._resetLimits();
+  state.cache.clear();
+  state.geminiErrorBody = '{"error":{"details":[{"quotaId":"GenerateRequestsPerDayPerProjectPerModel-FreeTier"}],"retryDelay":"30s"}}';
+  await call({ scope: 'season' }, 'r3');
+  assert.ok(recap._pausedFor('gemini') > 29 * 60 * 1000, 'the daily quota: half an hour');
+});
+
+test('the writer switch is only for the accounts in RECAP_ADMIN_UIDS', async () => {
+  config.groqApiKey = 'groq-key';
+  const answer = await call({ scope: 'season', writer: 'groq' }, 'not-an-admin');
+  assert.equal(answer.payload.model, 'gemini-test', 'Gemini first, as for everyone');
+  assert.equal(state.groqCalls.length, 0);
+  assert.equal(answer.payload.writerNotes, undefined);
+});
+
+test('all the writers share one time limit counted from the request, so an answer comes in time', async () => {
+  recap._setTotalBudget(5200);
+  state.geminiHangs = true;
+  // AbortSignal.timeout's timer does not keep Node running on its own (a live server always has something open).
+  const keepAlive = setInterval(() => {}, 1000);
+  const started = Date.now();
+  const answer = await call({ scope: 'season' }, 't1').finally(() => clearInterval(keepAlive));
+  const took = Date.now() - started;
+  assert.equal(answer.payload.source, 'synopses');
+  assert.ok(took < 6000, `answered within the limit, took ${took} ms`);
+  assert.equal(state.geminiCalls.length, 1, 'no time left for the backup after Flash used it all');
+});
+
+test("someone who joined a request refused for the first person's limit gets their own try", async () => {
+  config.recapUserDailyLimit = 1;
+  await call({ scope: 'season' }, 'busy', '43'); // their one recap of the day, another show
+  const [busy, other] = await Promise.all([call({ scope: 'season' }, 'busy'), call({ scope: 'season' }, 'other')]);
+  assert.equal(busy.payload.source, 'synopses');
+  assert.equal(busy.payload.reason, 'limit');
+  assert.equal(other.payload.source, 'ai');
+});
+
+test('"all" tapers: the current and previous season in full, earlier ones by their overview', () => {
+  const season = (n, overview) => ({
+    season_number: n,
+    overview,
+    episodes: [1, 2].map((e) => ({ episode_number: e, name: `${n}.${e}`, overview: `Season ${n} episode ${e} happens here. More detail follows that is long.` })),
+  });
+  const material = recap.collectMaterial(
+    [season(1, 'First season overview.'), season(2, ''), season(3, 'Third.'), season(4, 'SPOILER current')],
+    { season: 4, episode: 1 },
+    'all',
+  );
+  const bySeason = Object.fromEntries(material.map((m) => [m.season, m]));
+  assert.deepEqual(bySeason[1].episodes, [], 'an early season with an overview: the overview only');
+  assert.equal(bySeason[1].overview, 'First season overview.');
+  assert.deepEqual(bySeason[2].episodes.map((e) => e.overview), ['Season 2 episode 1 happens here.', 'Season 2 episode 2 happens here.'],
+    'no overview: the first sentence of each episode');
+  assert.equal(bySeason[3].episodes.length, 2, 'the previous season in full');
+  assert.ok(bySeason[3].episodes[0].overview.includes('More detail'));
+  assert.deepEqual(bySeason[4].episodes.map((e) => e.number), [1], "the current one up to the user's episode");
+  assert.equal(bySeason[4].overview, '', "never the current season's overview");
 });

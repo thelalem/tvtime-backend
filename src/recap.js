@@ -27,9 +27,14 @@ const CACHE_TTL_MS = 180 * 24 * 60 * 60 * 1000;
 // The writers in order share that time: Gemini Flash, then Gemini Flash-Lite (same key, its own free quota),
 // then Groq (fast, but it knows shows less well). Each gets its slice; the last one standing may use 90 s.
 const TIMEOUT_MS = { gemini: 50 * 1000, lite: 30 * 1000, groq: 15 * 1000 };
-const ALONE_TIMEOUT_MS = 90 * 1000;
-// After Gemini reports its quota spent, it is left alone for this long.
+// Counted from when the request came in (loading the synopses included), so whatever happens an answer leaves before
+// Cloudflare's and the app's 100 s: each writer gets its slice or what is left, the last one standing all that is left.
+let totalBudgetMs = 90 * 1000;
+const MIN_WRITER_MS = 5 * 1000;
+// After a writer reports its daily quota spent, it is left alone for this long.
 const QUOTA_PAUSE_MS = 30 * 60 * 1000;
+// A per-minute limit (several people at once): the wait the provider asks for, at least this.
+const SHORT_PAUSE_MS = 60 * 1000;
 // Less material than this is not worth a model call (it would have to invent).
 const MIN_MATERIAL_CHARS = 280;
 const EPISODE_KEY = /^S(\d{1,4})E(\d{1,5})$/;
@@ -74,6 +79,16 @@ function seasonRange(cutoff, scope) {
   return [cutoff.season, cutoff.season];
 }
 
+// The first sentence of a synopsis (at most about 200 characters).
+function firstSentence(text) {
+  const match = /^(.{20,200}?[.!?])(\s|$)/.exec(text);
+  return match ? match[1] : text.slice(0, 200);
+}
+
+// For "all": the current and the previous season in full (decided with the user); earlier ones only by their season
+// overview, or the first sentence of each episode when TMDB has none, so a long show's prompt stays small.
+const isBriefSeason = (number, cutoff, scope) => scope === 'all' && number < cutoff.season - 1;
+
 function collectMaterial(seasons, cutoff, scope, tvMaze = []) {
   const fromTvMaze = new Map();
   for (const episode of tvMaze || []) {
@@ -93,11 +108,16 @@ function collectMaterial(seasons, cutoff, scope, tvMaze = []) {
         name: plain(episode.name),
         overview: plain(episode.overview) || fromTvMaze.get(`${number}:${episode.episode_number}`) || '',
       }));
+    // A season's overview tells its whole story: only for a season the user has finished.
+    const overview = number < cutoff.season ? plain(season.overview) : '';
+    const brief = isBriefSeason(number, cutoff, scope);
     material.push({
       season: number,
-      // A season's overview tells its whole story: only for a season the user has finished.
-      overview: number < cutoff.season ? plain(season.overview) : '',
-      episodes,
+      overview,
+      brief,
+      episodes: !brief ? episodes
+        : overview ? []
+        : episodes.map((episode) => ({ ...episode, overview: episode.overview && firstSentence(episode.overview) })),
     });
   }
   return material.sort((a, b) => a.season - b.season);
@@ -123,8 +143,10 @@ function buildPrompt(showName, cutoff, scope, material) {
   const detail = 'Follow the main storylines in order, name the characters involved and the turning points, so ' +
     'the viewer can pick up straight away.';
   const shape = scope === 'all'
-    ? `Keep it brief, as it covers a lot: one or two sentences per season for the big picture, then three or ` +
-      `four sentences on season ${cutoff.season} up to episode ${cutoff.episode}.`
+    ? `Keep it brief, as it covers a lot, and taper the detail: three or four sentences on season ${cutoff.season} ` +
+      `up to episode ${cutoff.episode}` +
+      (cutoff.season > 1 ? `, a short paragraph on season ${cutoff.season - 1}` : '') +
+      (cutoff.season > 2 ? ', and less the further back it goes, down to a sentence for the first seasons.' : '.')
     : scope === 'last'
       ? `Write a detailed recap of season ${cutoff.season - 1}, the season before the one they are in, in about ` +
         `250 to 400 words. ${detail} End with how that season ended.`
@@ -166,15 +188,35 @@ function stitchSynopses(material) {
     const lines = season.episodes
       .filter((e) => e.overview)
       .map((e) => `E${e.number} ${e.name ? `"${e.name}": ` : ''}${e.overview}`);
-    const body = season.overview && lines.length > 6 ? [season.overview] : lines;
+    const body = season.overview && (lines.length > 6 || !lines.length) ? [season.overview] : lines;
     return [`Season ${season.season}`, ...(body.length ? body : ['No episode descriptions.'])].join('\n');
   }).join('\n\n');
 }
 
 // --- limits -------------------------------------------------------------------------------------
 
-// Per provider: after one reports its quota spent, it is left alone for QUOTA_PAUSE_MS.
+// Per provider: after a 429 it is left alone for a while (see pauseAfterLimit).
 const pausedUntil = { gemini: 0, lite: 0, groq: 0 };
+
+// A 429: a daily quota spent (half an hour, the next tries would fail too) or a per-minute limit, several people at
+// once (the wait the provider asks for, Retry-After or Gemini's RetryInfo, at least a minute). Pausing every 429 for
+// half an hour turned the writers off for everyone after a short rush. Throws the 'quota' Fallback.
+async function pauseAfterLimit(response, key) {
+  const body = await response.text().catch(() => '');
+  const header = response.headers && typeof response.headers.get === 'function'
+    ? response.headers.get('retry-after') : null;
+  let waitMs = Number(header) > 0 ? Number(header) * 1000 : null;
+  const retryDelay = /"retryDelay"\s*:\s*"(\d+(?:\.\d+)?)s"/.exec(body);
+  if (waitMs === null && retryDelay) waitMs = Number(retryDelay[1]) * 1000;
+  const daily = /PerDay|per day|daily|\bRPD\b|\bTPD\b/i.test(body);
+  const pause = daily || waitMs === null
+    ? QUOTA_PAUSE_MS
+    : Math.min(QUOTA_PAUSE_MS, Math.max(SHORT_PAUSE_MS, waitMs));
+  pausedUntil[key] = Date.now() + pause;
+  const error = new Fallback('quota');
+  error.detail = daily ? 'daily quota spent' : `rate limited, paused ${Math.round(pause / 1000)} s`;
+  throw error;
+}
 const userCalls = new Map();
 
 function utcDay(now = new Date()) {
@@ -183,6 +225,11 @@ function utcDay(now = new Date()) {
 
 // Takes one model call from the user's own daily allowance (kept in memory: a redeploy forgiving a few
 // calls is fine, the daily budget below is the real cap).
+function userCallsLeft(uid, limit) {
+  const entry = userCalls.get(uid);
+  return !entry || entry.day !== utcDay() || entry.count < limit;
+}
+
 function takeUserCall(uid, limit) {
   const day = utcDay();
   const entry = userCalls.get(uid);
@@ -226,10 +273,7 @@ async function askGemini(prompt, timeoutMs, model = config.geminiModel, pauseKey
     }),
     signal: AbortSignal.timeout(timeoutMs),
   });
-  if (response.status === 429) {
-    pausedUntil[pauseKey] = Date.now() + QUOTA_PAUSE_MS;
-    throw new Fallback('quota');
-  }
+  if (response.status === 429) await pauseAfterLimit(response, pauseKey);
   if (!response.ok) {
     const detail = await response.text().catch(() => '');
     console.error(`[recap] Gemini (${model}) answered ${response.status}: ${detail.slice(0, 300)}`);
@@ -265,10 +309,7 @@ async function askGroq(prompt, timeoutMs) {
     }),
     signal: AbortSignal.timeout(timeoutMs),
   });
-  if (response.status === 429) {
-    pausedUntil.groq = Date.now() + QUOTA_PAUSE_MS;
-    throw new Fallback('quota');
-  }
+  if (response.status === 429) await pauseAfterLimit(response, 'groq');
   if (!response.ok) {
     const detail = await response.text().catch(() => '');
     console.error(`[recap] Groq answered ${response.status}: ${detail.slice(0, 300)}`);
@@ -302,7 +343,7 @@ async function askGroq(prompt, timeoutMs) {
 
 // Gemini Flash, Gemini Flash-Lite, then Groq ([first]: that writer first, for checking one on the live server).
 // Throws a Fallback with the reason when none wrote it ('quota' when one was out of quota, else 'error').
-async function writeRecap(prompt, { first = null, notes = null } = {}) {
+async function writeRecap(prompt, { first = null, notes = null, deadline = Date.now() + totalBudgetMs } = {}) {
   const reasons = [];
   const now = Date.now();
   const writers = [
@@ -322,14 +363,20 @@ async function writeRecap(prompt, { first = null, notes = null } = {}) {
       return false;
     }
     if (now < pausedUntil[writer.key]) {
-      if (notes) notes[writer.name] = 'paused after running out of quota';
+      if (notes) notes[writer.name] = 'paused after a rate limit';
       reasons.push('quota');
       return false;
     }
     return true;
   });
   for (const [index, writer] of usable.entries()) {
-    const timeout = index === usable.length - 1 ? ALONE_TIMEOUT_MS : TIMEOUT_MS[writer.key];
+    const left = deadline - Date.now();
+    if (left < MIN_WRITER_MS) {
+      if (notes) notes[writer.name] = 'no time left';
+      reasons.push('error');
+      break;
+    }
+    const timeout = index === usable.length - 1 ? left : Math.min(TIMEOUT_MS[writer.key], left);
     try {
       return { text: await writer.ask(timeout), model: writer.model };
     } catch (error) {
@@ -391,6 +438,7 @@ function registerRecapRoutes(router) {
     const seriesId = parseId(request.params.seriesId);
     if (!seriesId) return response.status(400).json({ error: 'invalid_series_id' });
     const scope = ['all', 'last'].includes(request.query.scope) ? request.query.scope : 'season';
+    const deadline = Date.now() + totalBudgetMs;
     try {
       const { rows } = await pool.query(
         'SELECT watched_episodes, show_name FROM show_progress WHERE firebase_uid=$1 AND series_id=$2',
@@ -402,43 +450,58 @@ function registerRecapRoutes(router) {
       const showName = rows[0].show_name || 'this show';
 
       // v4: v1 could be cut off mid-sentence (see askGemini); v2 had shorter season recaps; v3 used only the synopses.
+      // "all" is v5: earlier seasons are given by their overview and the recap tapers (collectMaterial).
       // "Last season" covers a whole season, whatever episode of the next one the user is at: one recap per
       // season, shared by all. The others stop at the user's episode.
       const key = scope === 'last'
         ? `recap:v4:${seriesId}:last:S${cutoff.season - 1}`
-        : `recap:v4:${seriesId}:${scope}:S${cutoff.season}E${cutoff.episode}`;
+        : `recap:${scope === 'all' ? 'v5' : 'v4'}:${seriesId}:${scope}:S${cutoff.season}E${cutoff.episode}`;
       let material = null;
       const answer = { season: cutoff.season, episode: cutoff.episode, scope };
       // writer=gemini|lite|groq (checking a writer on the live server): that one first, and the answer says what
       // happened with each writer.
-      const first = ['gemini', 'lite', 'groq'].includes(request.query.writer) ? request.query.writer : null;
+      // Only for the accounts in RECAP_ADMIN_UIDS: the notes carry the providers' raw errors.
+      const first = config.recapAdminUids.includes(request.user.uid) &&
+        ['gemini', 'lite', 'groq'].includes(request.query.writer) ? request.query.writer : null;
       const writerNotes = {};
       try {
         // Two people (or two taps) asking for the same recap share one model call.
-        let pending = inFlight.get(key);
-        if (!pending) {
-          pending = readThrough(key, CACHE_TTL_MS, async () => {
+        const ask = () => readThrough(key, CACHE_TTL_MS, async () => {
             // A writer=... check always asks the writers.
             if (!first && recentlyFailed(key)) throw new Fallback('error');
             material = await loadMaterial(seriesId, showName, cutoff, scope);
             if (materialChars(material) < MIN_MATERIAL_CHARS) throw new Fallback('thin');
             if (!config.geminiApiKey && !config.groqApiKey) throw new Fallback('no_key');
-            if (!takeUserCall(request.user.uid, config.recapUserDailyLimit)) throw new Fallback('limit');
+            // The day's budget is taken only when the user has calls left, and theirs only once the budget gave one.
+            if (!userCallsLeft(request.user.uid, config.recapUserDailyLimit)) throw new Fallback('limit');
             if (!(await takeBudgetCall(config.geminiDailyBudget))) throw new Fallback('quota');
+            takeUserCall(request.user.uid, config.recapUserDailyLimit);
             try {
               return await writeRecap(buildPrompt(showName, cutoff, scope, material), {
                 first,
                 notes: first ? writerNotes : null,
+                deadline,
               });
             } catch (error) {
               if (error instanceof Fallback && error.reason === 'error') rememberFailure(key);
               throw error;
             }
           });
-          inFlight.set(key, pending);
-          pending.finally(() => inFlight.delete(key)).catch(() => {});
+        const start = () => {
+          const entry = { pending: ask(), uid: request.user.uid };
+          inFlight.set(key, entry);
+          entry.pending.finally(() => { if (inFlight.get(key) === entry) inFlight.delete(key); }).catch(() => {});
+          return entry;
+        };
+        const joined = inFlight.get(key) || start();
+        let cached;
+        try {
+          cached = await joined.pending;
+        } catch (error) {
+          // Refused only because whoever asked first is over their own daily limit: this person asks for themselves.
+          if (joined.uid === request.user.uid || !(error instanceof Fallback && error.reason === 'limit')) throw error;
+          cached = await start().pending;
         }
-        const cached = await pending;
         return response.json({
           ...answer, source: 'ai', model: cached.model, text: cached.text,
           ...(first && Object.keys(writerNotes).length ? { writerNotes } : {}),
@@ -464,4 +527,6 @@ module.exports = {
     pausedUntil.gemini = 0; pausedUntil.lite = 0; pausedUntil.groq = 0; userCalls.clear(); failedUntil.clear();
   },
   _failedRecaps: () => failedUntil.size,
+  _pausedFor: (key) => Math.max(0, pausedUntil[key] - Date.now()),
+  _setTotalBudget: (ms) => { totalBudgetMs = ms; },
 };

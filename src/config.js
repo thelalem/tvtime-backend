@@ -28,6 +28,9 @@ const config = {
   // Llama 3.3 was gone from Groq by Oct 2026 (model_not_found); writer=groq lists what a key can use.
   groqModel: process.env.GROQ_MODEL || 'openai/gpt-oss-120b',
   groqBaseUrl: process.env.GROQ_BASE_URL || 'https://api.groq.com/openai/v1',
+  // Accounts (Firebase uids, comma-separated) that may add ?writer=gemini|lite|groq to a recap to check one writer
+  // on the live server; the answer then carries the writers' error details. Empty: nobody.
+  recapAdminUids: (process.env.RECAP_ADMIN_UIDS || '').split(',').map((uid) => uid.trim()).filter(Boolean),
   tvMazeBaseUrl: process.env.TVMAZE_BASE_URL || 'https://api.tvmaze.com',
   corsAllowedOrigins: (process.env.CORS_ALLOWED_ORIGINS || '')
     .split(',')

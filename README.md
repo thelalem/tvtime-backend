@@ -64,7 +64,11 @@ The PostgreSQL tables are created on startup. User-data endpoints live under
   a limit, on an error or when it is too slow, Gemini Flash-Lite (`GEMINI_BACKUP_MODEL`, default
   `gemini-flash-lite-latest`, same key) writes it, then Groq if `GROQ_API_KEY` is set
   (`GROQ_MODEL`, default `openai/gpt-oss-120b`); with neither, or too little text, the answer is the synopses
-  (`reason` says why).
+  (`reason` says why). All writers together get 90 s from the request; a 429 pauses a writer for the wait it asks
+  for (at least a minute), or 30 minutes when its daily quota is spent. `scope=all` gives the current and previous
+  season in full and earlier seasons by their overview. `?writer=gemini|lite|groq` (that writer first, with each
+  writer's errors in `writerNotes`) works only for the accounts in `RECAP_ADMIN_UIDS` (comma-separated uids;
+  empty: nobody).
 - Account deletion (`src/account-deletion.js`, FEATURE_PLAN.md section 19): `POST /api/v1/me/account/delete-request`
   (needs a sign-in from the last 10 minutes, else 401 `recent_sign_in_required`) marks the account; it is locked
   (every other `/me` route answers 403 `account_pending_deletion`, except `GET /me`, cancelling and removing a
