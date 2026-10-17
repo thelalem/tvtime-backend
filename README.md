@@ -69,6 +69,9 @@ The PostgreSQL tables are created on startup. User-data endpoints live under
   season in full and earlier seasons by their overview. `?writer=gemini|lite|groq` (that writer first, with each
   writer's errors in `writerNotes`) works only for the accounts in `RECAP_ADMIN_UIDS` (comma-separated uids;
   empty: nobody).
+- `GET /api/v1/me/removed-items` -> `{ movies, movieFavorites, favorites }`: ids the user removed (a movie off the
+  list, a movie favorite, a show favorite; `src/removed-items.js`), recorded by the delete routes and cleared when the
+  user adds one back. The app's imports leave these out, so importing again does not bring them back.
 - Account deletion (`src/account-deletion.js`, FEATURE_PLAN.md section 19): `POST /api/v1/me/account/delete-request`
   (needs a sign-in from the last 10 minutes, else 401 `recent_sign_in_required`) marks the account; it is locked
   (every other `/me` route answers 403 `account_pending_deletion`, except `GET /me`, cancelling and removing a

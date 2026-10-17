@@ -1,6 +1,7 @@
 const { pool } = require('./db');
 const { getMovie, withImdbRatings } = require('./tmdb');
 const { localDateString } = require('./local-date');
+const { clearRemoved, markRemoved } = require('./removed-items');
 
 // The calendar day after `date` (YYYY-MM-DD).
 function nextDay(date) {
@@ -122,6 +123,7 @@ function registerMeMovieRoutes(router) {
                  to_char(watched_on, 'YYYY-MM-DD') AS "watchedOn"`,
       [request.user.uid, movie.id, JSON.stringify(movie)],
     );
+    await clearRemoved(request.user.uid, 'movie', movie.id);
     invalidateMovieCaches(request.user.uid);
     response.json(toResponse(rows[0]));
   }));
@@ -129,10 +131,12 @@ function registerMeMovieRoutes(router) {
   // A clean wipe: the row goes, and the watched date goes with it. (The app asks the user to
   // confirm first.) Favorites are a separate list and are left alone.
   router.delete('/me/movies/watchlist/:movieId', handle(async (request, response) => {
-    await pool.query(
+    const { rowCount } = await pool.query(
       'DELETE FROM movie_watchlist WHERE firebase_uid = $1 AND movie_id = $2',
       [request.user.uid, request.params.movieId],
     );
+    // Remembered, so importing again does not put it back (removed-items.js).
+    if (rowCount) await markRemoved(request.user.uid, 'movie', Number(request.params.movieId));
     invalidateMovieCaches(request.user.uid);
     response.status(204).end();
   }));
@@ -171,6 +175,7 @@ function registerMeMovieRoutes(router) {
                  to_char(watched_on, 'YYYY-MM-DD') AS "watchedOn"`,
       [request.user.uid, movie.id, JSON.stringify(movie), date],
     );
+    await clearRemoved(request.user.uid, 'movie', movie.id);
     invalidateMovieCaches(request.user.uid);
     return response.json(toResponse(rows[0]));
   }));
@@ -208,15 +213,17 @@ function registerMeMovieRoutes(router) {
        RETURNING movie AS data, added_at AS "addedAt", NULL::text AS "watchedOn"`,
       [request.user.uid, movie.id, JSON.stringify(movie)],
     );
+    await clearRemoved(request.user.uid, 'movie_favorite', movie.id);
     invalidateMovieCaches(request.user.uid);
     response.json(toResponse(rows[0]));
   }));
 
   router.delete('/me/movies/favorites/:movieId', handle(async (request, response) => {
-    await pool.query(
+    const { rowCount } = await pool.query(
       'DELETE FROM movie_favorites WHERE firebase_uid = $1 AND movie_id = $2',
       [request.user.uid, request.params.movieId],
     );
+    if (rowCount) await markRemoved(request.user.uid, 'movie_favorite', Number(request.params.movieId));
     invalidateMovieCaches(request.user.uid);
     response.status(204).end();
   }));

@@ -258,6 +258,17 @@ async function initializeDatabase() {
     ${addColumns('app_users', [['social_notifications', 'BOOLEAN NOT NULL DEFAULT TRUE']])}
     -- When the user asked for the account to be deleted (account-deletion.js); deleted 30 days later.
     ${addColumns('app_users', [['deletion_requested_at', 'TIMESTAMPTZ']])}
+    -- Movies, movie favorites and show favorites the user removed (removed-items.js). An import adds through the
+    -- ordinary routes and cannot tell a removal from "never had it", so it reads these and leaves them out; the user
+    -- adding one back clears its row. (Removed and stopped shows are in show_states.)
+    CREATE TABLE IF NOT EXISTS removed_items (
+      firebase_uid TEXT NOT NULL REFERENCES app_users(firebase_uid) ON DELETE CASCADE,
+      kind TEXT NOT NULL CHECK (kind IN ('movie', 'movie_favorite', 'favorite')),
+      item_id BIGINT NOT NULL,
+      removed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      PRIMARY KEY (firebase_uid, kind, item_id)
+    );
+
     -- A username its owner just gave up stays theirs for 14 days (social.js): claimed by someone else at once, it
     -- would receive the follows and links meant for the old owner. Deleted by the daily clean-up after that.
     CREATE TABLE IF NOT EXISTS username_holds (

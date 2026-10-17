@@ -272,6 +272,25 @@ test('favorites can be added, listed and removed', async () => {
   assert.deepEqual((await api(uid, 'GET', '/me/movies/favorites')).body, []);
 });
 
+test('removals are remembered for imports, and adding the item back forgets them', async () => {
+  const uid = newUser();
+  await api(uid, 'PUT', '/me/movies/watchlist/101/watched', { date: today() });
+  await api(uid, 'PUT', '/me/movies/favorites/104');
+  await api(uid, 'PUT', '/me/favorites/555', { id: 555, name: 'A Show' });
+  assert.deepEqual((await api(uid, 'GET', '/me/removed-items')).body, { movies: [], movieFavorites: [], favorites: [] });
+
+  await api(uid, 'DELETE', '/me/movies/watchlist/101');
+  await api(uid, 'DELETE', '/me/movies/favorites/104');
+  await api(uid, 'DELETE', '/me/favorites/555');
+  await api(uid, 'DELETE', '/me/movies/watchlist/999'); // never had it: nothing to remember
+  assert.deepEqual((await api(uid, 'GET', '/me/removed-items')).body, { movies: [101], movieFavorites: [104], favorites: [555] });
+
+  await api(uid, 'PUT', '/me/movies/watchlist/101');
+  await api(uid, 'PUT', '/me/movies/favorites/104');
+  await api(uid, 'PUT', '/me/favorites/555', { id: 555, name: 'A Show' });
+  assert.deepEqual((await api(uid, 'GET', '/me/removed-items')).body, { movies: [], movieFavorites: [], favorites: [] });
+});
+
 test('stats count watched movies and add up their runtimes', async () => {
   const uid = newUser();
   await api(uid, 'PUT', '/me/movies/watchlist/101/watched', { date: today() }); // 100 min

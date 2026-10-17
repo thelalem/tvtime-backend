@@ -19,6 +19,7 @@ const { registerRecapRoutes } = require('./recap');
 const { allowedWhilePending, deleteAfter, registerAccountRoutes } = require('./account-deletion');
 const { registerImportResolveRoute } = require('./import-resolve');
 const { invalidateStats, registerStatsRoutes } = require('./stats');
+const { clearRemoved, markRemoved, registerRemovedItemsRoute } = require('./removed-items');
 const { registerSocialRoutes } = require('./social');
 const { cleanRewatches, reconcilePasses } = require('./rewatch-logic');
 
@@ -112,6 +113,7 @@ registerRecapRoutes(router);
 registerAccountRoutes(router);
 registerImportResolveRoute(router);
 registerStatsRoutes(router);
+registerRemovedItemsRoute(router);
 registerSocialRoutes(router, { onFollow: (event) => notifyFollow(pool, event) });
 registerEpisodeDataRoutes(router);
 
@@ -472,6 +474,7 @@ router.put('/me/:collection/:seriesId', async (request, response, next) => {
       // Adding a stopped or removed show back (from search, or by ticking an episode) makes it
       // an ordinary watchlist show again, with its progress.
       if (table === 'watchlist') await clearShowState(db, request.user.uid, seriesId);
+      if (table === 'favorites') await clearRemoved(request.user.uid, 'favorite', seriesId, db);
       return result.rows;
     });
     invalidateRecommendations(request.user.uid);
@@ -488,8 +491,10 @@ router.delete('/me/:collection/:seriesId', async (request, response, next) => {
     return response.status(400).json({ error: 'invalid_series_id' });
   }
   try {
-    await pool.query(`DELETE FROM ${table} WHERE firebase_uid=$1 AND series_id=$2`,
+    const { rowCount } = await pool.query(`DELETE FROM ${table} WHERE firebase_uid=$1 AND series_id=$2`,
       [request.user.uid, seriesId]);
+    // A favorite taken off is remembered, so importing again does not put it back (removed-items.js).
+    if (rowCount && table === 'favorites') await markRemoved(request.user.uid, 'favorite', seriesId);
     invalidateRecommendations(request.user.uid);
     response.status(204).end();
   } catch (error) { next(error); }
