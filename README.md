@@ -65,6 +65,13 @@ The PostgreSQL tables are created on startup. User-data endpoints live under
   `gemini-flash-lite-latest`, same key) writes it, then Groq if `GROQ_API_KEY` is set
   (`GROQ_MODEL`, default `openai/gpt-oss-120b`); with neither, or too little text, the answer is the synopses
   (`reason` says why).
+- Account deletion (`src/account-deletion.js`, FEATURE_PLAN.md section 19): `POST /api/v1/me/account/delete-request`
+  (needs a sign-in from the last 10 minutes, else 401 `recent_sign_in_required`) marks the account; it is locked
+  (every other `/me` route answers 403 `account_pending_deletion`, except `GET /me`, cancelling and removing a
+  device), its push tokens are removed, and the daily clean-up deletes the Firebase sign-in and all data 30 days
+  later. `POST /api/v1/me/account/cancel-deletion` undoes it. `GET /me` includes `deletionRequestedAt` and
+  `deleteAfter`. The web page for Google Play is `GET /delete-account`. Every `/me` request re-checks with
+  Firebase, at most every 10 minutes per account, that the account still exists.
 - `DELETE /api/v1/me` with `{ "confirm": "delete" }` deletes everything the server holds for
   the account (204; 400 `confirm_required` without the body). The Firebase sign-in is not
   touched; the next request starts with an empty account.

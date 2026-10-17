@@ -16,6 +16,7 @@ const { sendJsonWithEtag } = require('./etag');
 const { PROGRESS_COLUMNS } = require('./progress-columns');
 const { registerRewatchRoutes } = require('./rewatches');
 const { registerRecapRoutes } = require('./recap');
+const { allowedWhilePending, deleteAfter, registerAccountRoutes } = require('./account-deletion');
 const { registerImportResolveRoute } = require('./import-resolve');
 const { registerStatsRoutes } = require('./stats');
 const { registerSocialRoutes } = require('./social');
@@ -47,19 +48,45 @@ const maxSeriesDocumentChars = 32 * 1024;
 // prompt, usable response instead of hitting a proxy timeout.
 const classificationRequestBudgetMs = 20 * 1000;
 
+// When each account was last confirmed to still exist in Firebase. A token stays valid for up to an hour after
+// its account is deleted, and the row below would bring the account back empty; checking with Firebase on
+// every request would cost a lookup each, so once every few minutes per account is enough.
+const accountCheckedAt = new Map();
+const accountCheckEveryMs = 10 * 60 * 1000;
+
+async function verifyToken(idToken) {
+  const token = await admin.auth().verifyIdToken(idToken);
+  const checked = accountCheckedAt.get(token.uid);
+  if (!checked || Date.now() - checked > accountCheckEveryMs) {
+    // Throws auth/user-not-found, auth/user-disabled or auth/id-token-revoked for an account that is gone.
+    await admin.auth().verifyIdToken(idToken, true);
+    if (accountCheckedAt.size > 10000) accountCheckedAt.clear();
+    accountCheckedAt.set(token.uid, Date.now());
+  }
+  return token;
+}
+
 router.use(async (request, response, next) => {
   if (request.path !== '/me' && !request.path.startsWith('/me/')) return next();
   const match = /^Bearer\s+(.+)$/i.exec(request.get('authorization') || '');
   if (!match) return response.status(401).json({ error: 'unauthenticated' });
   try {
-    const token = await admin.auth().verifyIdToken(match[1]);
-    request.user = { uid: token.uid, email: token.email || '' };
-    await pool.query(
-      `INSERT INTO app_users(firebase_uid, email) VALUES ($1, $2)
-       ON CONFLICT(firebase_uid) DO UPDATE SET email = EXCLUDED.email
-       WHERE app_users.email IS DISTINCT FROM EXCLUDED.email`,
+    const token = await verifyToken(match[1]);
+    request.user = { uid: token.uid, email: token.email || '', authTime: token.auth_time };
+    const { rows } = await pool.query(
+      `WITH upsert AS (
+         INSERT INTO app_users(firebase_uid, email) VALUES ($1, $2)
+         ON CONFLICT(firebase_uid) DO UPDATE SET email = EXCLUDED.email
+         WHERE app_users.email IS DISTINCT FROM EXCLUDED.email
+       )
+       SELECT deletion_requested_at AS at FROM app_users WHERE firebase_uid = $1`,
       [request.user.uid, request.user.email],
     );
+    // A deletion is pending (account-deletion.js): only reading /me, cancelling and removing a device.
+    const pendingAt = rows[0] && rows[0].at;
+    if (pendingAt && !allowedWhilePending(request.method, request.path)) {
+      return response.status(403).json({ error: 'account_pending_deletion', deleteAfter: deleteAfter(pendingAt) });
+    }
     next();
   } catch (error) {
     if (error && typeof error.code === 'string' && error.code.startsWith('auth/')) {
@@ -76,6 +103,7 @@ registerShowStateRoutes(router);
 registerNotificationRoutes(router);
 registerRewatchRoutes(router);
 registerRecapRoutes(router);
+registerAccountRoutes(router);
 registerImportResolveRoute(router);
 registerStatsRoutes(router);
 registerSocialRoutes(router, { onFollow: (event) => notifyFollow(pool, event) });
@@ -85,10 +113,12 @@ router.get('/me', async (request, response, next) => {
   try {
     const { rows } = await pool.query(
       `SELECT firebase_uid AS id, email, display_name AS "displayName",
-              photo_url AS "photoUrl", created_at AS "createdAt"
+              photo_url AS "photoUrl", created_at AS "createdAt",
+              deletion_requested_at AS "deletionRequestedAt"
        FROM app_users WHERE firebase_uid = $1`, [request.user.uid],
     );
-    response.json(rows[0]);
+    const me = rows[0];
+    response.json(me && { ...me, deleteAfter: deleteAfter(me.deletionRequestedAt) });
   } catch (error) { next(error); }
 });
 

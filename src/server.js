@@ -60,6 +60,12 @@ app.get('/', (_request, response) => {
   response.json({ service: 'TV Time API', status: 'ok' });
 });
 
+// Google Play asks for a page where people can delete their account without the app (FEATURE_PLAN.md
+// section 19). Signing in and the deletion itself go through Firebase and the /me routes.
+app.get('/delete-account', (_request, response) => {
+  response.sendFile(require('node:path').join(__dirname, 'public', 'delete-account.html'));
+});
+
 app.get('/health', (_request, response) => {
   response.json({ status: 'ok' });
 });
