@@ -127,6 +127,15 @@ test('Groq writes it when Gemini is out of quota, fails or has no key; both fail
 
   recap._resetLimits();
   state.cache.clear();
+  state.geminiStatus = 200;
+  state.groqStatus = 200;
+  state.geminiCalls.length = 0;
+  answer = await call({ scope: 'season', writer: 'groq' }, 'g4');
+  assert.equal(answer.payload.model, 'groq-test', 'writer=groq asks Groq first');
+  assert.equal(state.geminiCalls.length, 0);
+
+  recap._resetLimits();
+  state.cache.clear();
   config.geminiApiKey = '';
   state.groqStatus = 200;
   answer = await call({ scope: 'season' }, 'g3');
@@ -162,7 +171,7 @@ test('material stops at the cutoff; only finished seasons give their overview; T
 test('Gemini writes it from the synopses up to the user\'s episode; the answer is cached and shared', async () => {
   const first = await call({ scope: 'all' });
   assert.equal(first.status, 200);
-  assert.deepEqual(first.payload, { season: 2, episode: 2, scope: 'all', source: 'ai', text: 'Previously on The Show...' });
+  assert.deepEqual(first.payload, { season: 2, episode: 2, scope: 'all', source: 'ai', model: 'gemini-test', text: 'Previously on The Show...' });
   assert.equal(state.geminiCalls.length, 1);
   const sent = state.geminiCalls[0];
   assert.match(sent.url, /models\/gemini-test:generateContent$/);

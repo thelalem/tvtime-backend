@@ -280,32 +280,35 @@ async function askGroq(prompt) {
   return text;
 }
 
-// Gemini, then Groq. Throws a Fallback with the reason when neither wrote it ('quota' when one was out of
-// quota, else 'error').
-async function writeRecap(prompt) {
+// Gemini, then Groq ([preferGroq]: Groq first, for checking the backup on the live server). Throws a Fallback
+// with the reason when neither wrote it ('quota' when one was out of quota, else 'error').
+async function writeRecap(prompt, { preferGroq = false } = {}) {
   const reasons = [];
   const now = Date.now();
   const groqReady = Boolean(config.groqApiKey) && now >= pausedUntil.groq;
-  if (config.geminiApiKey && now >= pausedUntil.gemini) {
+  const writers = [
+    {
+      name: 'Gemini',
+      configured: Boolean(config.geminiApiKey),
+      ready: now >= pausedUntil.gemini,
+      model: config.geminiModel,
+      ask: () => askGemini(prompt, groqReady && !preferGroq ? GEMINI_TIMEOUT_WITH_BACKUP_MS : GEMINI_TIMEOUT_MS),
+    },
+    { name: 'Groq', configured: Boolean(config.groqApiKey), ready: groqReady, model: config.groqModel, ask: () => askGroq(prompt) },
+  ];
+  if (preferGroq) writers.reverse();
+  for (const writer of writers) {
+    if (!writer.configured) continue;
+    if (!writer.ready) {
+      reasons.push('quota');
+      continue;
+    }
     try {
-      const timeout = groqReady ? GEMINI_TIMEOUT_WITH_BACKUP_MS : GEMINI_TIMEOUT_MS;
-      return { text: await askGemini(prompt, timeout), model: config.geminiModel };
+      return { text: await writer.ask(), model: writer.model };
     } catch (error) {
-      if (!(error instanceof Fallback)) console.error(`[recap] Gemini failed: ${error.message}`);
+      if (!(error instanceof Fallback)) console.error(`[recap] ${writer.name} failed: ${error.message}`);
       reasons.push(error instanceof Fallback ? error.reason : 'error');
     }
-  } else if (config.geminiApiKey) {
-    reasons.push('quota');
-  }
-  if (groqReady) {
-    try {
-      return { text: await askGroq(prompt), model: config.groqModel };
-    } catch (error) {
-      if (!(error instanceof Fallback)) console.error(`[recap] Groq failed: ${error.message}`);
-      reasons.push(error instanceof Fallback ? error.reason : 'error');
-    }
-  } else if (config.groqApiKey) {
-    reasons.push('quota');
   }
   throw new Fallback(reasons.includes('quota') ? 'quota' : 'error');
 }
@@ -367,13 +370,15 @@ function registerRecapRoutes(router) {
             if (!config.geminiApiKey && !config.groqApiKey) throw new Fallback('no_key');
             if (!takeUserCall(request.user.uid, config.recapUserDailyLimit)) throw new Fallback('limit');
             if (!(await takeBudgetCall(config.geminiDailyBudget))) throw new Fallback('quota');
-            return writeRecap(buildPrompt(showName, cutoff, scope, material));
+            return writeRecap(buildPrompt(showName, cutoff, scope, material), {
+              preferGroq: request.query.writer === 'groq',
+            });
           });
           inFlight.set(key, pending);
           pending.finally(() => inFlight.delete(key)).catch(() => {});
         }
         const cached = await pending;
-        return response.json({ ...answer, source: 'ai', text: cached.text });
+        return response.json({ ...answer, source: 'ai', model: cached.model, text: cached.text });
       } catch (error) {
         const reason = error instanceof Fallback ? error.reason : 'error';
         if (!(error instanceof Fallback)) console.error(`[recap] ${seriesId}: ${error.message}`);
