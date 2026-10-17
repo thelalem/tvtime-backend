@@ -256,7 +256,9 @@ async function askGroq(prompt) {
       model: config.groqModel,
       messages: [{ role: 'user', content: prompt }],
       temperature: 0.4,
-      max_tokens: 2048,
+      // gpt-oss thinks first, and the thinking counts against max_tokens (as with Gemini).
+      max_tokens: 8192,
+      ...(/gpt-oss/.test(config.groqModel) ? { reasoning_effort: 'low' } : {}),
     }),
     signal: AbortSignal.timeout(GROQ_TIMEOUT_MS),
   });

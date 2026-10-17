@@ -23,7 +23,8 @@ const config = {
   recapUserDailyLimit: Number(process.env.RECAP_USER_DAILY_LIMIT) || 15,
   // The backup writer when Gemini is out of quota, fails or is too slow (optional).
   groqApiKey: process.env.GROQ_API_KEY,
-  groqModel: process.env.GROQ_MODEL || 'llama-3.3-70b-versatile',
+  // Llama 3.3 was gone from Groq by Oct 2026 (model_not_found); writer=groq lists what a key can use.
+  groqModel: process.env.GROQ_MODEL || 'openai/gpt-oss-120b',
   groqBaseUrl: process.env.GROQ_BASE_URL || 'https://api.groq.com/openai/v1',
   tvMazeBaseUrl: process.env.TVMAZE_BASE_URL || 'https://api.tvmaze.com',
   corsAllowedOrigins: (process.env.CORS_ALLOWED_ORIGINS || '')
