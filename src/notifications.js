@@ -186,6 +186,49 @@ async function notifyUser(db, user, { getUpcoming, send, now }) {
   return count;
 }
 
+// A quiet push when someone follows the user, or asks to (a private profile): "@name started following you".
+// Not sent when the user turned notifications or follower alerts off, has no device, or already got one for this
+// pair in the last day. `event` is { followerUid, followeeUid, status }. `send` is a parameter for tests.
+const FOLLOW_NOTICE_GAP = '24 hours';
+async function notifyFollow(db, { followerUid, followeeUid, status }, send = sendThroughFcm) {
+  const { rows } = await db.query(
+    `SELECT f.display_name AS "followerName", f.username AS "followerUsername",
+            t.notifications_enabled AS enabled, t.social_notifications AS social
+     FROM app_users f, app_users t WHERE f.firebase_uid = $1 AND t.firebase_uid = $2`,
+    [followerUid, followeeUid],
+  );
+  const who = rows[0];
+  if (!who || who.enabled === false || who.social === false || !who.followerUsername) return false;
+  const tokens = await db.query('SELECT token FROM device_tokens WHERE firebase_uid = $1', [followeeUid]);
+  if (!tokens.rowCount) return false;
+  // One a day for the same two people.
+  const claim = await db.query(
+    `INSERT INTO follow_notices(follower_uid, followee_uid) VALUES ($1, $2)
+     ON CONFLICT (follower_uid, followee_uid) DO UPDATE SET sent_at = NOW()
+     WHERE follow_notices.sent_at < NOW() - INTERVAL '${FOLLOW_NOTICE_GAP}' RETURNING 1`,
+    [followerUid, followeeUid],
+  );
+  if (!claim.rowCount) return false;
+  const name = (who.followerName && who.followerName.trim()) || `@${who.followerUsername}`;
+  const pending = status === 'pending';
+  try {
+    const dead = await send(tokens.rows.map((row) => row.token), {
+      title: pending ? 'Follow request' : 'New follower',
+      body: pending ? `${name} wants to follow you` : `${name} started following you`,
+      data: { type: 'new_follower', username: who.followerUsername, status: pending ? 'pending' : 'accepted' },
+      tag: `follower-${who.followerUsername}`,
+      silent: true,
+    });
+    if (dead?.length) await db.query('DELETE FROM device_tokens WHERE token = ANY($1)', [dead]);
+    return true;
+  } catch (error) {
+    // Let a later follow try again.
+    await db.query('DELETE FROM follow_notices WHERE follower_uid = $1 AND followee_uid = $2', [followerUid, followeeUid]);
+    console.error(`[notifications] follow push failed for ${followeeUid}: ${error.message}`);
+    return false;
+  }
+}
+
 let sweeping = false;
 function startNotificationSweeps() {
   if (process.env.NOTIFICATIONS_DISABLED === '1') {
@@ -247,7 +290,7 @@ function registerNotificationRoutes(router) {
     try {
       const uid = request.user.uid;
       const [user, muted] = await Promise.all([
-        pool.query('SELECT notifications_enabled AS enabled FROM app_users WHERE firebase_uid=$1', [uid]),
+        pool.query('SELECT notifications_enabled AS enabled, social_notifications AS social FROM app_users WHERE firebase_uid=$1', [uid]),
         pool.query(
           'SELECT series_id, name, poster_path FROM muted_shows WHERE firebase_uid=$1 ORDER BY series_id',
           [uid],
@@ -255,6 +298,7 @@ function registerNotificationRoutes(router) {
       ]);
       response.json({
         enabled: user.rows[0]?.enabled ?? true,
+        social: user.rows[0]?.social ?? true,
         mutedShows: muted.rows.map((row) => Number(row.series_id)),
         muted: muted.rows.map((row) => ({
           id: Number(row.series_id),
@@ -266,12 +310,21 @@ function registerNotificationRoutes(router) {
   });
 
   router.patch('/me/notification-settings', async (request, response, next) => {
-    const { enabled } = request.body || {};
-    if (typeof enabled !== 'boolean') return response.status(400).json({ error: 'invalid_enabled' });
+    // `enabled`: new-episode alerts; `social`: a new follower or follow request. Either or both.
+    const { enabled, social } = request.body || {};
+    if ((enabled !== undefined && typeof enabled !== 'boolean') ||
+        (social !== undefined && typeof social !== 'boolean') ||
+        (enabled === undefined && social === undefined)) {
+      return response.status(400).json({ error: 'invalid_enabled' });
+    }
     try {
-      await pool.query('UPDATE app_users SET notifications_enabled=$2 WHERE firebase_uid=$1',
-        [request.user.uid, enabled]);
-      response.json({ enabled });
+      const { rows } = await pool.query(
+        `UPDATE app_users SET notifications_enabled = COALESCE($2, notifications_enabled),
+                              social_notifications = COALESCE($3, social_notifications)
+         WHERE firebase_uid=$1 RETURNING notifications_enabled AS enabled, social_notifications AS social`,
+        [request.user.uid, enabled ?? null, social ?? null],
+      );
+      response.json(rows[0] || { enabled: enabled ?? true, social: social ?? true });
     } catch (error) { next(error); }
   });
 
@@ -305,6 +358,7 @@ function registerNotificationRoutes(router) {
 }
 
 module.exports = {
+  notifyFollow,
   registerNotificationRoutes,
   runNotificationSweep,
   sendThroughFcm,

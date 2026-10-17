@@ -34,6 +34,7 @@ const express = require('express');
 const { pool } = require('../src/db');
 const { initializeDatabase } = require('../src/schema');
 const { router } = require('../src/user-data');
+const { notifyFollow } = require('../src/notifications');
 
 const users = [];
 let server;
@@ -273,4 +274,96 @@ test('deleting an account removes its follows, blocks and username', async () =>
   const blocks = await pool.query('SELECT 1 FROM blocks WHERE blocker_uid = $1 OR blocked_uid = $1', [lee.uid]);
   assert.equal(left.rowCount + blocks.rowCount, 0);
   assert.equal((await api(max.uid, 'GET', `/me/social/users/${lee.handle}`)).status, 404);
+});
+
+// --- the push when someone follows ------------------------------------------------------------------------------------
+async function withDevice(uid) {
+  const token = `tok-${uid}-${'x'.repeat(24)}`;
+  await pool.query('INSERT INTO device_tokens(token, firebase_uid) VALUES ($1, $2) ON CONFLICT DO NOTHING', [token, uid]);
+  return token;
+}
+function recorder(result = []) {
+  const sent = [];
+  const send = async (tokens, message) => {
+    sent.push({ tokens, ...message });
+    if (result instanceof Error) throw result;
+    return result;
+  };
+  return { sent, send };
+}
+
+test('follow push: a quiet "started following you", once a day for the same two people', async () => {
+  const nat = await person('nat');
+  const olly = await person('olly');
+  const token = await withDevice(olly.uid);
+  const push = recorder();
+  assert.equal(await notifyFollow(pool, { followerUid: nat.uid, followeeUid: olly.uid, status: 'accepted' }, push.send), true);
+  assert.equal(push.sent.length, 1);
+  const message = push.sent[0];
+  assert.deepEqual(message.tokens, [token]);
+  assert.equal(message.title, 'New follower');
+  assert.equal(message.body, `@${nat.handle} started following you`);
+  assert.deepEqual(message.data, { type: 'new_follower', username: nat.handle, status: 'accepted' });
+  assert.equal(message.silent, true, 'a quiet push');
+  assert.equal(message.tag, `follower-${nat.handle}`);
+  assert.equal(await notifyFollow(pool, { followerUid: nat.uid, followeeUid: olly.uid, status: 'accepted' }, push.send), false, 'not twice in a day');
+  assert.equal(push.sent.length, 1);
+  await pool.query(`UPDATE follow_notices SET sent_at = NOW() - INTERVAL '2 days' WHERE follower_uid = $1`, [nat.uid]);
+  assert.equal(await notifyFollow(pool, { followerUid: nat.uid, followeeUid: olly.uid, status: 'accepted' }, push.send), true, 'a day later it may go again');
+});
+
+test('follow push: a request says so, a display name is used, and the switches and devices are respected', async () => {
+  const pam = await person('pam');
+  const quin = await person('quin');
+  await pool.query(`UPDATE app_users SET display_name = 'Pam Beesly' WHERE firebase_uid = $1`, [pam.uid]);
+  const none = recorder();
+  assert.equal(await notifyFollow(pool, { followerUid: pam.uid, followeeUid: quin.uid, status: 'pending' }, none.send), false, 'no device, no push');
+  await withDevice(quin.uid);
+  const push = recorder();
+  assert.equal(await notifyFollow(pool, { followerUid: pam.uid, followeeUid: quin.uid, status: 'pending' }, push.send), true);
+  assert.equal(push.sent[0].title, 'Follow request');
+  assert.equal(push.sent[0].body, 'Pam Beesly wants to follow you');
+  assert.equal(push.sent[0].data.status, 'pending');
+
+  await pool.query('DELETE FROM follow_notices');
+  assert.equal((await api(quin.uid, 'PATCH', '/me/notification-settings', { social: false })).body.social, false);
+  assert.equal((await api(quin.uid, 'GET', '/me/notification-settings')).body.social, false);
+  assert.equal(await notifyFollow(pool, { followerUid: pam.uid, followeeUid: quin.uid, status: 'accepted' }, push.send), false, 'follower alerts are off');
+  assert.equal((await api(quin.uid, 'PATCH', '/me/notification-settings', { social: true, enabled: false })).body.enabled, false);
+  assert.equal(await notifyFollow(pool, { followerUid: pam.uid, followeeUid: quin.uid, status: 'accepted' }, push.send), false, 'all notifications are off');
+  assert.equal(push.sent.length, 1);
+  assert.equal((await api(quin.uid, 'PATCH', '/me/notification-settings', {})).status, 400);
+  assert.equal((await api(quin.uid, 'PATCH', '/me/notification-settings', { social: 'yes' })).status, 400);
+  assert.equal((await api(quin.uid, 'PATCH', '/me/notification-settings', { enabled: true })).body.social, true, 'the other switch is left alone');
+});
+
+test('follow push: a failed send is tried again on the next follow, and dead devices are removed', async () => {
+  const rae = await person('rae');
+  const sam = await person('sam');
+  const token = await withDevice(sam.uid);
+  const failing = recorder(new Error('FCM is down'));
+  const log = console.error;
+  console.error = () => {};
+  try {
+    assert.equal(await notifyFollow(pool, { followerUid: rae.uid, followeeUid: sam.uid, status: 'accepted' }, failing.send), false);
+  } finally {
+    console.error = log;
+  }
+  const dead = recorder([token]);
+  assert.equal(await notifyFollow(pool, { followerUid: rae.uid, followeeUid: sam.uid, status: 'accepted' }, dead.send), true, 'the failure did not use up the day');
+  assert.equal((await pool.query('SELECT 1 FROM device_tokens WHERE token = $1', [token])).rowCount, 0, 'a dead token is deleted');
+});
+
+test('following through the route sends the push (to a user with a device)', async () => {
+  const tom = await person('tom');
+  const una = await person('una');
+  await withDevice(una.uid);
+  // The real route uses the real sender, which cannot reach Firebase here: the follow must still succeed.
+  const log = console.error;
+  console.error = () => {};
+  try {
+    assert.equal((await api(tom.uid, 'POST', `/me/social/following/${una.handle}`)).status, 201);
+  } finally {
+    console.error = log;
+  }
 });

@@ -124,7 +124,7 @@ test('device tokens: validated, upserted, moved to the new user, deleted on sign
 
 test('settings: on by default, master switch and per-show mute round-trip', async () => {
   const uid = newUser();
-  assert.deepEqual((await api(uid, 'GET', '/me/notification-settings')).body, { enabled: true, mutedShows: [], muted: [] });
+  assert.deepEqual((await api(uid, 'GET', '/me/notification-settings')).body, { enabled: true, social: true, mutedShows: [], muted: [] });
   assert.equal((await api(uid, 'PATCH', '/me/notification-settings', { enabled: 'no' })).status, 400);
   await api(uid, 'PATCH', '/me/notification-settings', { enabled: false });
   // Statuses checked, so a failed write shows as itself rather than as a missing row.
@@ -133,6 +133,7 @@ test('settings: on by default, master switch and per-show mute round-trip', asyn
   assert.equal((await api(uid, 'PUT', '/me/notification-settings/muted/3')).status, 200);
   assert.deepEqual((await api(uid, 'GET', '/me/notification-settings')).body, {
     enabled: false,
+    social: true,
     mutedShows: [3, 7],
     muted: [{ id: 3, name: null, posterPath: null }, { id: 7, name: 'Seven', posterPath: '/7.jpg' }],
   });

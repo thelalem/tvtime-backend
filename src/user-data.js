@@ -6,7 +6,7 @@ const { getUpcomingEpisodes } = require('./upcoming');
 const { getRecommendations, invalidateRecommendations } = require('./recommendations');
 const { registerMeMovieRoutes } = require('./me-movies');
 const { registerEpisodeDataRoutes } = require('./episode-data');
-const { registerNotificationRoutes } = require('./notifications');
+const { notifyFollow, registerNotificationRoutes } = require('./notifications');
 const { clearShowState, loadShowStates, registerShowStateRoutes } = require('./show-states');
 const { hasAired, isValidTimeZone, localDateString } = require('./local-date');
 const {
@@ -78,7 +78,7 @@ registerRewatchRoutes(router);
 registerRecapRoutes(router);
 registerImportResolveRoute(router);
 registerStatsRoutes(router);
-registerSocialRoutes(router);
+registerSocialRoutes(router, { onFollow: (event) => notifyFollow(pool, event) });
 registerEpisodeDataRoutes(router);
 
 router.get('/me', async (request, response, next) => {

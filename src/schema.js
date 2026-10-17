@@ -244,6 +244,16 @@ async function initializeDatabase() {
     END $$;
 
     -- A block hides both people from each other and removes any follow between them.
+    -- Whether a new follower or a follow request sends a push (FEATURE_PLAN.md section 19), and when the last one
+    -- for a follower and followee pair went out (at most one a day, so unfollowing and following again cannot spam).
+    ${addColumns('app_users', [['social_notifications', 'BOOLEAN NOT NULL DEFAULT TRUE']])}
+    CREATE TABLE IF NOT EXISTS follow_notices (
+      follower_uid TEXT NOT NULL REFERENCES app_users(firebase_uid) ON DELETE CASCADE,
+      followee_uid TEXT NOT NULL REFERENCES app_users(firebase_uid) ON DELETE CASCADE,
+      sent_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      PRIMARY KEY (follower_uid, followee_uid)
+    );
+
     CREATE TABLE IF NOT EXISTS blocks (
       blocker_uid TEXT NOT NULL REFERENCES app_users(firebase_uid) ON DELETE CASCADE,
       blocked_uid TEXT NOT NULL REFERENCES app_users(firebase_uid) ON DELETE CASCADE,
