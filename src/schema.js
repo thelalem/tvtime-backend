@@ -217,6 +217,40 @@ async function initializeDatabase() {
       day DATE PRIMARY KEY,
       calls INTEGER NOT NULL
     );
+
+    -- Social (FEATURE_PLAN.md section 19, social.js). username: lower-cased, unique, chosen by the person on their first
+    -- visit to the social section (NULL until then). profile_public: anyone may follow and see the stats and show lists;
+    -- when FALSE a follow waits for approval.
+    ${addColumns('app_users', [['username', 'TEXT'], ['profile_public', 'BOOLEAN NOT NULL DEFAULT TRUE']])}
+    DO $$ BEGIN
+      IF to_regclass('app_users_username_key') IS NULL THEN
+        CREATE UNIQUE INDEX app_users_username_key ON app_users (lower(username)) WHERE username IS NOT NULL;
+      END IF;
+    END $$;
+
+    -- One-way follows. status is accepted or pending (a follow of a private profile waits for approval).
+    CREATE TABLE IF NOT EXISTS follows (
+      follower_uid TEXT NOT NULL REFERENCES app_users(firebase_uid) ON DELETE CASCADE,
+      followee_uid TEXT NOT NULL REFERENCES app_users(firebase_uid) ON DELETE CASCADE,
+      status TEXT NOT NULL DEFAULT 'accepted' CHECK (status IN ('accepted', 'pending')),
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      PRIMARY KEY (follower_uid, followee_uid),
+      CHECK (follower_uid <> followee_uid)
+    );
+    DO $$ BEGIN
+      IF to_regclass('follows_followee_idx') IS NULL THEN
+        CREATE INDEX follows_followee_idx ON follows(followee_uid, status);
+      END IF;
+    END $$;
+
+    -- A block hides both people from each other and removes any follow between them.
+    CREATE TABLE IF NOT EXISTS blocks (
+      blocker_uid TEXT NOT NULL REFERENCES app_users(firebase_uid) ON DELETE CASCADE,
+      blocked_uid TEXT NOT NULL REFERENCES app_users(firebase_uid) ON DELETE CASCADE,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      PRIMARY KEY (blocker_uid, blocked_uid),
+      CHECK (blocker_uid <> blocked_uid)
+    );
   `);
 }
 

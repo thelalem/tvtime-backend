@@ -18,6 +18,7 @@ const { registerRewatchRoutes } = require('./rewatches');
 const { registerRecapRoutes } = require('./recap');
 const { registerImportResolveRoute } = require('./import-resolve');
 const { registerStatsRoutes } = require('./stats');
+const { registerSocialRoutes } = require('./social');
 const { cleanRewatches, reconcilePasses } = require('./rewatch-logic');
 
 // Case-sensitive, like the sign-in check below: Express matched /ME/watchlist
@@ -77,6 +78,7 @@ registerRewatchRoutes(router);
 registerRecapRoutes(router);
 registerImportResolveRoute(router);
 registerStatsRoutes(router);
+registerSocialRoutes(router);
 registerEpisodeDataRoutes(router);
 
 router.get('/me', async (request, response, next) => {
