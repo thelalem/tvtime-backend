@@ -237,6 +237,36 @@ test("a username given up stays its owner's for 14 days; they can take it back",
   assert.equal((await api(bob.uid, 'PUT', '/me/social/username', { username: freed })).status, 200);
 });
 
+test('compare?kind=movies compares the watched movies: rows, shared, only theirs, genre score', async () => {
+  const maya = await person('maya');
+  const noel = await person('noel');
+  const add = (uid, id, title, runtime, genres, watchedOn) => pool.query(
+    `INSERT INTO movie_watchlist(firebase_uid, movie_id, movie, watched_on) VALUES ($1, $2, $3::jsonb, $4)`,
+    [uid, id, JSON.stringify({ title, runtime, poster_path: `/${id}.jpg`, genre_ids: genres, release_date: '2010-01-01' }), watchedOn],
+  );
+  await add(maya.uid, 501, 'Both Film', 100, [28], '2026-03-01');
+  await add(maya.uid, 502, 'Only Maya', 120, [35], '2026-03-02');
+  await add(maya.uid, 503, 'Not watched', 90, [28], null);
+  await add(noel.uid, 501, 'Both Film', 100, [28], '2026-04-01');
+  await add(noel.uid, 504, 'Only Noel', 150, [28], '2026-04-02');
+  await add(noel.uid, 505, 'Only Noel 2', 80, [28, 12], '2026-04-03');
+
+  const { status, body } = await api(maya.uid, 'GET', `/me/social/users/${noel.handle}/compare?kind=movies`);
+  assert.equal(status, 200);
+  assert.equal(body.kind, 'movies');
+  const row = (key) => body.rows.find((r) => r.key === key);
+  assert.deepEqual([row('movies').you, row('movies').them, row('movies').ahead], [2, 3, 'them']);
+  assert.deepEqual([row('minutes').you, row('minutes').them], [220, 330]);
+  assert.equal(row('longest').them, 150);
+  assert.deepEqual(body.commonShows.map((m) => m.id), [501]);
+  assert.equal(body.commonCount, 1);
+  assert.deepEqual(body.onlyThem.map((m) => [m.id, m.you]), [[505, 80], [504, 150]], 'their most recent first, with runtimes');
+  assert.ok(body.similarity > 0 && body.similarity <= 100);
+  // Shows stay the default; an unknown kind is the shows comparison.
+  assert.equal((await api(maya.uid, 'GET', `/me/social/users/${noel.handle}/compare`)).body.kind, 'shows');
+  assert.equal((await api(maya.uid, 'GET', `/me/social/users/${noel.handle}/compare?kind=nonsense`)).body.kind, 'shows');
+});
+
 test('compare counts every show, not only the most recent 300', async () => {
   const kai = await person('kai', { watched: [[9801, 2]] });
   const lea = await person('lea', { watched: [[9801, 4]] });

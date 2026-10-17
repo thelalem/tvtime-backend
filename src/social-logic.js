@@ -113,6 +113,66 @@ function compare({ myStats, theirStats, myShows, theirShows }) {
   };
 }
 
+const MOVIE_LIMIT = 20;
+
+// How alike two lists of genre counts are, 0 to 100 (cosine: the same mix of genres reads 100 whatever the sizes).
+function genreMatch(a, b) {
+  let dot = 0;
+  let sa = 0;
+  let sb = 0;
+  for (const id of new Set([...a.keys(), ...b.keys()])) {
+    const x = a.get(id) || 0;
+    const y = b.get(id) || 0;
+    dot += x * y;
+    sa += x * x;
+    sb += y * y;
+  }
+  return sa === 0 || sb === 0 ? 0 : Math.round((dot / Math.sqrt(sa * sb)) * 100);
+}
+
+// The movies version of the comparison. `myMovies` and `theirMovies` are the watched ones, the most recent first:
+// [{ id, name, posterPath, runtime, genres: [ids] }]. Rows: movies, watch time, average length, this year, longest.
+// `commonShows` / `onlyThem` carry movies (kept under those names so the app reads one shape): `you` and `them` are
+// the movie's runtime. The similarity is how alike the genres of the two lists are.
+function compareMovies({ myStats, theirStats, myMovies, theirMovies }) {
+  const take = (stats) => {
+    const movies = stats.movieStats || {};
+    return {
+      movies: movies.watched || 0,
+      minutes: movies.minutes || 0,
+      average: movies.averageRuntime || 0,
+      thisYear: movies.thisYear || 0,
+      longest: movies.longest ? movies.longest.runtime : 0,
+    };
+  };
+  const you = take(myStats);
+  const them = take(theirStats);
+  const rows = Object.keys(you).map((key) => ({
+    key,
+    you: you[key],
+    them: them[key],
+    ahead: you[key] === them[key] ? 'tie' : you[key] > them[key] ? 'you' : 'them',
+  }));
+  const mine = new Set(myMovies.map((movie) => movie.id));
+  const card = (movie) => ({
+    id: movie.id, name: movie.name, posterPath: movie.posterPath || null,
+    you: movie.runtime || 0, them: movie.runtime || 0,
+  });
+  const common = theirMovies.filter((movie) => mine.has(movie.id));
+  const genres = (movies) => {
+    const counts = new Map();
+    for (const movie of movies) for (const id of new Set(movie.genres || [])) counts.set(id, (counts.get(id) || 0) + 1);
+    return counts;
+  };
+  return {
+    rows,
+    commonShows: common.slice(0, MOVIE_LIMIT).map(card),
+    commonCount: common.length,
+    onlyThem: theirMovies.filter((movie) => !mine.has(movie.id)).slice(0, MOVIE_LIMIT).map(card),
+    similarity: genreMatch(genres(myMovies), genres(theirMovies)),
+  };
+}
+
 module.exports = {
-  RESERVED, USERNAME, canViewProfile, compare, normalizeUsername, similarity, suggestUsername, usernameProblem,
+  RESERVED, USERNAME, canViewProfile, compare, compareMovies, genreMatch, normalizeUsername, similarity, suggestUsername, usernameProblem,
 };

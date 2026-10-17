@@ -2,7 +2,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { createRateLimiter } = require('../src/rate-limit');
 const {
-  canViewProfile, compare, normalizeUsername, similarity, suggestUsername, usernameProblem,
+  canViewProfile, compare, compareMovies, genreMatch, normalizeUsername, similarity, suggestUsername, usernameProblem,
 } = require('../src/social-logic');
 
 test('usernames: lower-cased, an @ is dropped, 3 to 20 of a-z 0-9 _, starting with a letter', () => {
@@ -111,4 +111,42 @@ test('rate limiter: allows up to the limit in a window, then refuses until the w
   clock += 120000;
   limiter.sweep();
   assert.equal(limiter.size(), 0, 'idle keys are forgotten');
+});
+
+test('compareMovies: rows, the movies both watched, the ones only they watched, and a genre score', () => {
+  const ms = (watched, minutes, average, thisYear, longest) => ({
+    movieStats: { watched, minutes, averageRuntime: average, thisYear, longest: longest ? { runtime: longest } : null },
+  });
+  const movie = (id, genres, runtime = 100) => ({ id, name: `Movie ${id}`, posterPath: null, runtime, genres });
+  const result = compareMovies({
+    myStats: ms(3, 300, 100, 2, 150),
+    theirStats: ms(5, 500, 100, 1, 190),
+    myMovies: [movie(1, [28]), movie(2, [35]), movie(3, [28])],
+    theirMovies: [movie(1, [28], 120), movie(4, [28]), movie(5, [18]), movie(6, [18]), movie(7, [18])],
+  });
+  const row = (key) => result.rows.find((r) => r.key === key);
+  assert.deepEqual(result.rows.map((r) => r.key), ['movies', 'minutes', 'average', 'thisYear', 'longest']);
+  assert.equal(row('movies').ahead, 'them');
+  assert.equal(row('average').ahead, 'tie');
+  assert.equal(row('thisYear').ahead, 'you');
+  assert.equal(row('longest').them, 190);
+  assert.deepEqual(result.commonShows.map((m) => [m.id, m.you]), [[1, 120]], 'their runtime is on the card');
+  assert.equal(result.commonCount, 1);
+  assert.deepEqual(result.onlyThem.map((m) => m.id), [4, 5, 6, 7], 'in their order, the shared one left out');
+  assert.ok(result.similarity > 0 && result.similarity < 100);
+});
+
+test('compareMovies: nobody watching anything is zeros; the limit is 20; genres decide the score', () => {
+  const none = { movieStats: { watched: 0, minutes: 0, averageRuntime: 0, thisYear: 0, longest: null } };
+  const empty = compareMovies({ myStats: none, theirStats: none, myMovies: [], theirMovies: [] });
+  assert.ok(empty.rows.every((r) => r.you === 0 && r.them === 0 && r.ahead === 'tie'));
+  assert.equal(empty.similarity, 0);
+  assert.equal(compareMovies({ myStats: {}, theirStats: {}, myMovies: [], theirMovies: [] }).rows[0].you, 0, 'no movieStats at all');
+
+  const many = Array.from({ length: 30 }, (_, i) => ({ id: 100 + i, name: `M${i}`, posterPath: null, runtime: 90, genres: [28] }));
+  assert.equal(compareMovies({ myStats: none, theirStats: none, myMovies: [], theirMovies: many }).onlyThem.length, 20);
+
+  assert.equal(genreMatch(new Map([[28, 4], [35, 2]]), new Map([[28, 40], [35, 20]])), 100, 'the same mix at another size');
+  assert.equal(genreMatch(new Map([[28, 4]]), new Map([[35, 2]])), 0, 'nothing in common');
+  assert.equal(genreMatch(new Map(), new Map([[35, 2]])), 0);
 });

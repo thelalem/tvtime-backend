@@ -22,7 +22,7 @@ const { pool } = require('./db');
 const { loadStats } = require('./stats');
 const { createRateLimiter, limitRoute } = require('./rate-limit');
 const {
-  canViewProfile, compare, normalizeUsername, suggestUsername, usernameProblem,
+  canViewProfile, compare, compareMovies, normalizeUsername, suggestUsername, usernameProblem,
 } = require('./social-logic');
 
 const MINUTE_MS = 60 * 1000;
@@ -93,6 +93,20 @@ async function watchedShows(db, uid, limit) {
     [uid, limit],
   );
   return result.rows.map((row) => ({ ...row, id: Number(row.id) }));
+}
+
+// The movies a person has watched, the most recent first (compare needs all of them).
+async function watchedMovies(db, uid) {
+  const result = await db.query(
+    `SELECT movie_id AS id, movie->>'title' AS name, movie->>'poster_path' AS "posterPath",
+            (movie->>'runtime')::int AS runtime, movie->'genre_ids' AS genres
+     FROM movie_watchlist WHERE firebase_uid = $1 AND watched_on IS NOT NULL
+     ORDER BY watched_on DESC, added_at DESC`,
+    [uid],
+  );
+  return result.rows.map((row) => ({
+    ...row, id: Number(row.id), genres: Array.isArray(row.genres) ? row.genres.filter(Number.isInteger) : [],
+  }));
 }
 
 // What a profile shows: the watched shows and the favorites.
@@ -405,15 +419,20 @@ function registerSocialRoutes(router, { onFollow = async () => {} } = {}) {
     if (!seen) return response.status(404).json({ error: 'not_found' });
     if (seen.isSelf) return response.status(400).json({ error: 'cannot_compare_yourself' });
     if (!seen.canView) return response.status(403).json({ error: 'private' });
-    const [myStats, theirStats, myShows, theirShows] = await Promise.all([
-      loadStats(me), loadStats(seen.target.uid), watchedShows(pool, me, null), watchedShows(pool, seen.target.uid, null),
-    ]);
-    response.json({
+    const kind = request.query.kind === 'movies' ? 'movies' : 'shows';
+    const [myStats, theirStats] = await Promise.all([loadStats(me), loadStats(seen.target.uid)]);
+    const head = {
       username: seen.target.username,
       displayName: seen.target.displayName,
+      kind,
       approximate: Boolean(myStats.approximate || theirStats.approximate),
-      ...compare({ myStats, theirStats, myShows, theirShows }),
-    });
+    };
+    if (kind === 'movies') {
+      const [myMovies, theirMovies] = await Promise.all([watchedMovies(pool, me), watchedMovies(pool, seen.target.uid)]);
+      return response.json({ ...head, ...compareMovies({ myStats, theirStats, myMovies, theirMovies }) });
+    }
+    const [myShows, theirShows] = await Promise.all([watchedShows(pool, me, null), watchedShows(pool, seen.target.uid, null)]);
+    return response.json({ ...head, ...compare({ myStats, theirStats, myShows, theirShows }) });
   }));
 
   router.get('/me/social/users/:username/avatar', handle(async (request, response) => {
