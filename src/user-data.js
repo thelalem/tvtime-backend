@@ -16,6 +16,7 @@ const { sendJsonWithEtag } = require('./etag');
 const { PROGRESS_COLUMNS } = require('./progress-columns');
 const { registerRewatchRoutes } = require('./rewatches');
 const { registerImportResolveRoute } = require('./import-resolve');
+const { registerStatsRoutes } = require('./stats');
 const { cleanRewatches, reconcilePasses } = require('./rewatch-logic');
 
 // Case-sensitive, like the sign-in check below: Express matched /ME/watchlist
@@ -73,6 +74,7 @@ registerShowStateRoutes(router);
 registerNotificationRoutes(router);
 registerRewatchRoutes(router);
 registerImportResolveRoute(router);
+registerStatsRoutes(router);
 registerEpisodeDataRoutes(router);
 
 router.get('/me', async (request, response, next) => {
