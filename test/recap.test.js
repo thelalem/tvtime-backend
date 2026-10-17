@@ -235,6 +235,10 @@ test('last season: the whole season before the current one, with its overview; n
   const answer = await call({ scope: 'last' });
   assert.equal(answer.payload.scope, 'last');
   assert.ok(!state.geminiCalls[0].body.contents[0].parts[0].text.includes('s2e1'), 'nothing of season 2');
+  const calls = state.geminiCalls.length;
+  state.watched = ['S1E1', 'S1E2', 'S1E3', 'S2E1'];
+  assert.equal((await call({ scope: 'last' }, 'other')).payload.source, 'ai');
+  assert.equal(state.geminiCalls.length, calls, 'someone at S2E1 shares the season 1 recap made for S2E2');
   state.watched = ['S1E2'];
   assert.equal((await call({ scope: 'last' })).status, 404);
 });

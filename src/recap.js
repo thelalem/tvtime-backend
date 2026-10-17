@@ -137,8 +137,12 @@ function buildPrompt(showName, cutoff, scope, material) {
     ? `the last episode of season ${lastSeason}`
     : `season ${cutoff.season}, episode ${cutoff.episode}${lastEpisode && lastEpisode.name ? ` ("${lastEpisode.name}")` : ''}`;
   return [
-    `Write a "previously on" recap of the TV show "${showName}" for a viewer who has watched up to ` +
-      `season ${cutoff.season}, episode ${cutoff.episode} and is coming back after a break.`,
+    lastSeason !== null
+      // The same for everyone in the next season, so it can be shared (see the cache key).
+      ? `Write a "previously on" recap of the TV show "${showName}" for a viewer who has finished season ` +
+        `${lastSeason} and is coming back after a break.`
+      : `Write a "previously on" recap of the TV show "${showName}" for a viewer who has watched up to ` +
+        `season ${cutoff.season}, episode ${cutoff.episode} and is coming back after a break.`,
     shape,
     'Draw on what you know about the show itself: what actually happened in each episode, who did what, and ' +
       'how the storylines turned out. The episode descriptions below are short pre-air teasers; use them to keep ' +
@@ -346,7 +350,11 @@ function registerRecapRoutes(router) {
       const showName = rows[0].show_name || 'this show';
 
       // v4: v1 could be cut off mid-sentence (see askGemini); v2 had shorter season recaps; v3 used only the synopses.
-      const key = `recap:v4:${seriesId}:${scope}:S${cutoff.season}E${cutoff.episode}`;
+      // "Last season" covers a whole season, whatever episode of the next one the user is at: one recap per
+      // season, shared by all. The others stop at the user's episode.
+      const key = scope === 'last'
+        ? `recap:v4:${seriesId}:last:S${cutoff.season - 1}`
+        : `recap:v4:${seriesId}:${scope}:S${cutoff.season}E${cutoff.episode}`;
       let material = null;
       const answer = { season: cutoff.season, episode: cutoff.episode, scope };
       try {
