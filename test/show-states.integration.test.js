@@ -282,3 +282,23 @@ test('the compact watchlist view carries no episode lists and no All Shows', asy
   assert.equal(row.watchedEpisodeDates, undefined);
   assert.equal(row.watchedCount, 1, 'the summary fields stay');
 });
+
+test('DELETE /me wipes the account only with confirm; the next request starts empty', async () => {
+  const uid = newUser();
+  const other = newUser();
+  await add(uid, 20, 'Twenty');
+  await watch(uid, 20, 'Twenty');
+  await add(other, 21, 'Twenty-one');
+
+  assert.equal((await api(uid, 'DELETE', '/me')).status, 400);
+  assert.equal((await api(uid, 'DELETE', '/me', { confirm: 'yes' })).status, 400);
+  assert.deepEqual(watchlistIds(await view(uid)), [20]);
+
+  assert.equal((await api(uid, 'DELETE', '/me', { confirm: 'delete' })).status, 204);
+  const body = await view(uid);
+  assert.deepEqual(watchlistIds(body), []);
+  assert.deepEqual(allShowIds(body), []);
+  const progress = await pool.query('SELECT 1 FROM show_progress WHERE firebase_uid = $1', [uid]);
+  assert.equal(progress.rowCount, 0);
+  assert.deepEqual(watchlistIds(await view(other)), [21]);
+});

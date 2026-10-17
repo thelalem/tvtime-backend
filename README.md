@@ -56,6 +56,9 @@ The PostgreSQL tables are created on startup. User-data endpoints live under
 - `GET`, `PATCH /api/v1/me`. `PATCH` accepts `displayName` and `timezone` (an
   IANA name such as `Africa/Addis_Ababa`; invalid names get a 400). The app
   reports `timezone` on sign-in and each time it returns to the foreground.
+- `DELETE /api/v1/me` with `{ "confirm": "delete" }` deletes everything the server holds for
+  the account (204; 400 `confirm_required` without the body). The Firebase sign-in is not
+  touched; the next request starts with an empty account.
 - `GET`, `POST`, `DELETE /api/v1/me/avatar`
 - `GET /api/v1/me/watchlist` and `PUT`, `DELETE /api/v1/me/watchlist/:showId`
 - `GET /api/v1/me/watchlist-view` returns the watchlist and progress in one

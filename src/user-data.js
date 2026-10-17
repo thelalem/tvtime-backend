@@ -115,6 +115,20 @@ router.patch('/me', async (request, response, next) => {
   } catch (error) { next(error); }
 });
 
+// Deletes everything the server holds for this account (every per-user table cascades from
+// app_users). The sign-in itself lives in Firebase and is not touched. The body must say
+// { confirm: "delete" } so a stray request cannot wipe an account. The next request recreates
+// an empty user row.
+router.delete('/me', async (request, response, next) => {
+  if ((request.body || {}).confirm !== 'delete') {
+    return response.status(400).json({ error: 'confirm_required' });
+  }
+  try {
+    await pool.query('DELETE FROM app_users WHERE firebase_uid = $1', [request.user.uid]);
+    response.status(204).end();
+  } catch (error) { next(error); }
+});
+
 router.post('/me/avatar', async (request, response, next) => {
   const { contentType, imageBase64 } = request.body || {};
   if (!['image/jpeg', 'image/png', 'image/webp', 'image/gif'].includes(contentType) ||
