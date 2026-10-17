@@ -17,6 +17,9 @@
 //   busiest day, so ticking a season does not read as sixty episodes in one second.
 
 const BULK_LIMIT = 3;
+// More movies than this on one day are a bulk day (the day an account was set up and everything seen so far was ticked):
+// they count in the totals and the months, but not in the busiest month, the streaks or the active days.
+const MOVIE_BULK_DAY = 10;
 const MINUTE_MS = 60 * 1000;
 const FALLBACK_RUNTIME = 42;
 const TOP_COUNT = 5;
@@ -194,7 +197,7 @@ const MOVIE_GENRES = {
 // The Movies half of the stats page: only watched movies (a date on them), their time, months, genres, decades and
 // the longest and shortest. A movie with no known runtime adds no minutes and is left out of the average and the
 // longest/shortest.
-function movieStatsFor(movies, today) {
+function movieStatsFor(movies, today, bulkDays = new Set()) {
   const watched = movies.filter((movie) => /^\d{4}-\d{2}-\d{2}$/.test(movie.watchedOn || ''));
   const withRuntime = watched.filter((movie) => Number.isFinite(movie.runtime) && movie.runtime > 0);
   const minutes = withRuntime.reduce((sum, movie) => sum + movie.runtime, 0);
@@ -222,7 +225,15 @@ function movieStatsFor(movies, today) {
       months.push({ month: key, movies: 0, minutes: 0 });
     }
   }
-  const busiestMonth = months.reduce((best, item) => (item.movies > (best ? best.movies : 0) ? item : best), null);
+  // The busiest month counts the movies of ordinary days only.
+  const bulkInMonth = new Map();
+  for (const movie of watched) {
+    if (!bulkDays.has(movie.watchedOn)) continue;
+    const key = movie.watchedOn.slice(0, 7);
+    bulkInMonth.set(key, (bulkInMonth.get(key) || 0) + 1);
+  }
+  const ordinary = (item) => item.movies - (bulkInMonth.get(item.month) || 0);
+  const busiestMonth = months.reduce((best, item) => (ordinary(item) > (best ? ordinary(best) : 0) ? item : best), null);
 
   const genreCounts = new Map();
   const decadeCounts = new Map();
@@ -259,7 +270,8 @@ function movieStatsFor(movies, today) {
     thisYear: watched.filter((movie) => movie.watchedOn.startsWith(thisYear)).length,
     unknownRuntime: watched.length - withRuntime.length,
     months,
-    busiestMonth: busiestMonth && busiestMonth.movies > 0 ? busiestMonth : null,
+    busiestMonth: busiestMonth && ordinary(busiestMonth) > 0 ? busiestMonth : null,
+    bulkMovies: watched.filter((movie) => bulkDays.has(movie.watchedOn)).length,
     genres,
     decades,
     longest: card(byLength[byLength.length - 1]),
@@ -348,12 +360,24 @@ function computeStats({
       if (!latest || event.ms > latest.ms) latest = { ms: event.ms, kind: 'episode', title: event.show.name, key: event.key, day };
     }
   }
+  const perDay = new Map();
+  for (const movie of movies) {
+    if (/^\d{4}-\d{2}-\d{2}$/.test(movie.watchedOn || '')) perDay.set(movie.watchedOn, (perDay.get(movie.watchedOn) || 0) + 1);
+  }
+  const bulkDays = new Set([...perDay].filter(([, count]) => count > MOVIE_BULK_DAY).map(([day]) => day));
+  const bulkMovieMinutes = new Map(); // month -> minutes of movies ticked on bulk days
   for (const movie of movies) {
     if (!/^\d{4}-\d{2}-\d{2}$/.test(movie.watchedOn || '')) continue;
-    activeDays.add(movie.watchedOn);
+    const runtime = Number.isFinite(movie.runtime) ? movie.runtime : 0;
+    if (bulkDays.has(movie.watchedOn)) {
+      const key = movie.watchedOn.slice(0, 7);
+      bulkMovieMinutes.set(key, (bulkMovieMinutes.get(key) || 0) + runtime);
+    } else {
+      activeDays.add(movie.watchedOn);
+    }
     const bucket = month(movie.watchedOn.slice(0, 7));
     bucket.movies += 1;
-    bucket.minutes += Number.isFinite(movie.runtime) ? movie.runtime : 0;
+    bucket.minutes += runtime;
     const ms = Date.parse(`${movie.watchedOn}T12:00:00Z`);
     if (!first || ms < first.ms) first = { ms, kind: 'movie', title: movie.title, key: null, day: movie.watchedOn };
     if (!latest || ms > latest.ms) latest = { ms, kind: 'movie', title: movie.title, key: null, day: movie.watchedOn };
@@ -393,7 +417,9 @@ function computeStats({
       filled.push({ month: key, episodes: 0, rewatches: 0, movies: 0, minutes: 0 });
     }
   }
-  const busiestMonth = filled.reduce((best, item) => (item.minutes > (best ? best.minutes : 0) ? item : best), null);
+  // The busiest month leaves out the movies of bulk days.
+  const ordinaryMinutes = (item) => item.minutes - (bulkMovieMinutes.get(item.month) || 0);
+  const busiestMonth = filled.reduce((best, item) => (ordinaryMinutes(item) > (best ? ordinaryMinutes(best) : 0) ? item : best), null);
 
   const shaped = [...perShow.values()].filter((entry) => entry.episodes + entry.rewatches > 0);
   const card = (entry) => ({
@@ -449,7 +475,7 @@ function computeStats({
     streak: { longest: longestRun(activeDays), current: currentRun(activeDays, today) },
     activeDays: activeDays.size,
     months: filled,
-    busiestMonth: busiestMonth && busiestMonth.minutes > 0 ? busiestMonth : null,
+    busiestMonth: busiestMonth && ordinaryMinutes(busiestMonth) > 0 ? busiestMonth : null,
     topShows,
     mostRewatched,
     bulkEpisodes: bulk,
@@ -466,7 +492,7 @@ function computeStats({
       catchUpDate: daysToCatchUp !== null && daysToCatchUp < 36500 ? addDays(today, daysToCatchUp) : null,
       unknownShows,
     },
-    movieStats: movieStatsFor(movies, today),
+    movieStats: movieStatsFor(movies, today, bulkDays),
     library,
     ratings,
   };

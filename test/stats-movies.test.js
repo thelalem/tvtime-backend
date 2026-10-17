@@ -95,3 +95,36 @@ test('movie stats: the totals header and the movie section agree', () => {
   assert.equal(all.totals.movies, all.movieStats.watched);
   assert.equal(all.totals.minutes.movies, all.movieStats.minutes);
 });
+
+// The day an account was set up and everything seen so far was ticked is not a busy month.
+test('bulk movie days: counted in the totals and months, but not the busiest month, the streak or the active days', () => {
+  const setupDay = Array.from({ length: 30 }, (_, i) => movie(100 + i, { watchedOn: '2020-10-02' }));
+  const real = [
+    movie(1, { watchedOn: '2021-03-05' }), movie(2, { watchedOn: '2021-03-06' }),
+    movie(3, { watchedOn: '2021-04-01' }),
+  ];
+  const all = computeStats({ shows: [], movies: [...setupDay, ...real], timezone: 'UTC', now: NOW });
+  assert.equal(all.totals.movies, 33, 'every movie is counted');
+  assert.equal(all.movieStats.watched, 33);
+  assert.equal(all.movieStats.bulkMovies, 30);
+  const october = all.movieStats.months.find((item) => item.month === '2020-10');
+  assert.equal(october.movies, 30, 'the month still shows them');
+  assert.equal(all.movieStats.busiestMonth.month, '2021-03', 'the busiest month is a real one');
+  assert.equal(all.busiestMonth.month, '2021-03', 'and so is the overall one');
+  assert.equal(all.activeDays, 3, 'the setup day is not a day with a watch');
+  assert.equal(all.streak.longest.days, 2);
+});
+
+test('bulk movie days: ten or fewer on a day is ordinary; only bulk days leave the busiest month empty', () => {
+  const ten = Array.from({ length: 10 }, (_, i) => movie(200 + i, { watchedOn: '2022-01-01' }));
+  const result = computeStats({ shows: [], movies: ten, timezone: 'UTC', now: NOW });
+  assert.equal(result.movieStats.bulkMovies, 0);
+  assert.equal(result.movieStats.busiestMonth.month, '2022-01');
+  const eleven = [...ten, movie(210, { watchedOn: '2022-01-01' })];
+  const bulk = computeStats({ shows: [], movies: eleven, timezone: 'UTC', now: NOW });
+  assert.equal(bulk.movieStats.bulkMovies, 11);
+  assert.equal(bulk.movieStats.busiestMonth, null, 'nothing but a bulk day: no busiest month');
+  assert.equal(bulk.busiestMonth, null);
+  assert.equal(bulk.activeDays, 0);
+  assert.equal(bulk.movieStats.watched, 11);
+});
