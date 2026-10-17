@@ -211,6 +211,37 @@ test('compare: numbers, shared and only-theirs shows, similarity; not yourself',
   assert.equal((await api(hal.uid, 'GET', `/me/social/users/${hal.handle}/compare`)).status, 400);
 });
 
+test('following needs a username of your own (a follow from someone without one could never be answered)', async () => {
+  const pia = await person('pia', { isPublic: false });
+  const nameless = newUser();
+  const refused = await api(nameless, 'POST', `/me/social/following/${pia.handle}`);
+  assert.equal(refused.status, 409);
+  assert.equal(refused.body.error, 'username_required');
+  const counts = (await api(pia.uid, 'GET', `/me/social/users/${pia.handle}`)).body;
+  assert.equal(counts.followers, 0);
+});
+
+test('compare counts every show, not only the most recent 300', async () => {
+  const kai = await person('kai', { watched: [[9801, 2]] });
+  const lea = await person('lea', { watched: [[9801, 4]] });
+  // Lea has watched 320 more shows since 9801, which is now her oldest.
+  await pool.query(
+    `INSERT INTO show_progress(firebase_uid, series_id, show_name, watched_count, last_watched)
+     SELECT $1, 990000 + n, 'Filler ' || n, 1, NOW() - (n || ' minutes')::interval FROM generate_series(1, 320) AS n`,
+    [lea.uid],
+  );
+  await pool.query(
+    "UPDATE show_progress SET last_watched = NOW() - INTERVAL '5 years' WHERE firebase_uid=$1 AND series_id=9801",
+    [lea.uid],
+  );
+  const result = (await api(kai.uid, 'GET', `/me/social/users/${lea.handle}/compare`)).body;
+  assert.equal(result.commonCount, 1, 'the shared show is found though it is her oldest');
+  assert.deepEqual(result.commonShows.map((s) => s.id), [9801]);
+  // Her profile still lists at most 300.
+  const profile = (await api(kai.uid, 'GET', `/me/social/users/${lea.handle}`)).body;
+  assert.equal(profile.shows.length, 300);
+});
+
 test('block: both vanish for each other, follows go, and unblocking brings them back', async () => {
   const jon = await person('jon', { watched: [[9701, 2]] });
   const kay = await person('kay');

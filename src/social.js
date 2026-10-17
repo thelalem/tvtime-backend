@@ -82,16 +82,23 @@ async function counts(db, uid) {
   return rows[0];
 }
 
-// The shows a person watches (the ones with progress, less those they removed) and their favorites.
+// The shows a person watches (the ones with progress, less those they removed), most recent first; at most [limit]
+// (null: all of them, which compare needs: shows in common beyond the most recent 300 counted as not shared).
+async function watchedShows(db, uid, limit) {
+  const result = await db.query(
+    `SELECT series_id AS id, show_name AS name, poster_path AS "posterPath", watched_count AS episodes
+     FROM show_progress WHERE firebase_uid = $1 AND watched_count > 0
+       AND series_id NOT IN (SELECT series_id FROM show_states WHERE firebase_uid = $1 AND state = 'removed')
+     ORDER BY last_watched DESC NULLS LAST LIMIT $2`,
+    [uid, limit],
+  );
+  return result.rows.map((row) => ({ ...row, id: Number(row.id) }));
+}
+
+// What a profile shows: the watched shows and the favorites.
 async function showLists(db, uid) {
   const [shows, favoriteShows, favoriteMovies] = await Promise.all([
-    db.query(
-      `SELECT series_id AS id, show_name AS name, poster_path AS "posterPath", watched_count AS episodes
-       FROM show_progress WHERE firebase_uid = $1 AND watched_count > 0
-         AND series_id NOT IN (SELECT series_id FROM show_states WHERE firebase_uid = $1 AND state = 'removed')
-       ORDER BY last_watched DESC NULLS LAST LIMIT $2`,
-      [uid, SHOWS_IN_LIST],
-    ),
+    watchedShows(db, uid, SHOWS_IN_LIST),
     db.query(
       `SELECT series_id AS id, series->>'name' AS name, series->>'posterPath' AS "posterPath"
        FROM favorites WHERE firebase_uid = $1 ORDER BY added_at DESC LIMIT 100`,
@@ -104,7 +111,7 @@ async function showLists(db, uid) {
     ),
   ]);
   const rows = (result) => result.rows.map((row) => ({ ...row, id: Number(row.id) }));
-  return { shows: rows(shows), favoriteShows: rows(favoriteShows), favoriteMovies: rows(favoriteMovies) };
+  return { shows, favoriteShows: rows(favoriteShows), favoriteMovies: rows(favoriteMovies) };
 }
 
 // Stats as another person sees them: ratings stay private.
@@ -216,9 +223,15 @@ function registerSocialRoutes(router, { onFollow = async () => {} } = {}) {
   // --- follow, unfollow, remove a follower --------------------------------------------------------------------
   router.post('/me/social/following/:username', writeLimit, handle(async (request, response) => {
     const me = request.user.uid;
-    const target = await findUser(pool, request.params.username);
+    const [target, mine] = await Promise.all([
+      findUser(pool, request.params.username),
+      pool.query('SELECT username FROM app_users WHERE firebase_uid = $1', [me]),
+    ]);
     if (!target || await isBlocked(pool, me, target.uid)) return response.status(404).json({ error: 'not_found' });
     if (target.uid === me) return response.status(400).json({ error: 'cannot_follow_yourself' });
+    // Follower lists and requests show people by username: a follow from someone without one was counted (a request
+    // dot) but could never be seen, accepted or declined.
+    if (!mine.rows[0] || !mine.rows[0].username) return response.status(409).json({ error: 'username_required' });
     const { rows } = await pool.query(
       `INSERT INTO follows(follower_uid, followee_uid, status) VALUES ($1, $2, $3)
        ON CONFLICT (follower_uid, followee_uid) DO NOTHING RETURNING status`,
@@ -355,14 +368,14 @@ function registerSocialRoutes(router, { onFollow = async () => {} } = {}) {
     if (!seen) return response.status(404).json({ error: 'not_found' });
     if (seen.isSelf) return response.status(400).json({ error: 'cannot_compare_yourself' });
     if (!seen.canView) return response.status(403).json({ error: 'private' });
-    const [myStats, theirStats, mine, theirs] = await Promise.all([
-      loadStats(me), loadStats(seen.target.uid), showLists(pool, me), showLists(pool, seen.target.uid),
+    const [myStats, theirStats, myShows, theirShows] = await Promise.all([
+      loadStats(me), loadStats(seen.target.uid), watchedShows(pool, me, null), watchedShows(pool, seen.target.uid, null),
     ]);
     response.json({
       username: seen.target.username,
       displayName: seen.target.displayName,
       approximate: Boolean(myStats.approximate || theirStats.approximate),
-      ...compare({ myStats, theirStats, myShows: mine.shows, theirShows: theirs.shows }),
+      ...compare({ myStats, theirStats, myShows, theirShows }),
     });
   }));
 
