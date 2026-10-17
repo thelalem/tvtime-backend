@@ -109,6 +109,31 @@ async function watchedMovies(db, uid) {
   }));
 }
 
+// What a person has on their lists and has not started, for "watch together": unseen movies, and shows with no episode
+// watched (less the ones they removed).
+async function waitingMovies(db, uid) {
+  const result = await db.query(
+    `SELECT movie_id AS id, movie->>'title' AS name, movie->>'poster_path' AS "posterPath", (movie->>'runtime')::int AS runtime
+     FROM movie_watchlist WHERE firebase_uid = $1 AND watched_on IS NULL ORDER BY added_at DESC`,
+    [uid],
+  );
+  return result.rows.map((row) => ({ ...row, id: Number(row.id) }));
+}
+
+async function waitingShows(db, uid) {
+  const result = await db.query(
+    `SELECT w.series_id AS id, w.series->>'name' AS name, w.series->>'posterPath' AS "posterPath"
+     FROM watchlist w
+     WHERE w.firebase_uid = $1
+       AND NOT EXISTS (SELECT 1 FROM show_progress p
+                       WHERE p.firebase_uid = w.firebase_uid AND p.series_id = w.series_id AND p.watched_count > 0)
+       AND w.series_id NOT IN (SELECT series_id FROM show_states WHERE firebase_uid = $1 AND state = 'removed')
+     ORDER BY w.added_at DESC`,
+    [uid],
+  );
+  return result.rows.map((row) => ({ ...row, id: Number(row.id), name: row.name || 'Show' }));
+}
+
 // What a profile shows: the watched shows and the favorites.
 async function showLists(db, uid) {
   const [shows, favoriteShows, favoriteMovies] = await Promise.all([
@@ -428,11 +453,17 @@ function registerSocialRoutes(router, { onFollow = async () => {} } = {}) {
       approximate: Boolean(myStats.approximate || theirStats.approximate),
     };
     if (kind === 'movies') {
-      const [myMovies, theirMovies] = await Promise.all([watchedMovies(pool, me), watchedMovies(pool, seen.target.uid)]);
-      return response.json({ ...head, ...compareMovies({ myStats, theirStats, myMovies, theirMovies }) });
+      const [myMovies, theirMovies, myWaiting, theirWaiting] = await Promise.all([
+        watchedMovies(pool, me), watchedMovies(pool, seen.target.uid), waitingMovies(pool, me), waitingMovies(pool, seen.target.uid),
+      ]);
+      return response.json({
+        ...head, ...compareMovies({ myStats, theirStats, myMovies, theirMovies, myWaiting, theirWaiting }),
+      });
     }
-    const [myShows, theirShows] = await Promise.all([watchedShows(pool, me, null), watchedShows(pool, seen.target.uid, null)]);
-    return response.json({ ...head, ...compare({ myStats, theirStats, myShows, theirShows }) });
+    const [myShows, theirShows, myWaiting, theirWaiting] = await Promise.all([
+      watchedShows(pool, me, null), watchedShows(pool, seen.target.uid, null), waitingShows(pool, me), waitingShows(pool, seen.target.uid),
+    ]);
+    return response.json({ ...head, ...compare({ myStats, theirStats, myShows, theirShows, myWaiting, theirWaiting }) });
   }));
 
   router.get('/me/social/users/:username/avatar', handle(async (request, response) => {

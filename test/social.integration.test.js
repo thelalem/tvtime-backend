@@ -262,9 +262,35 @@ test('compare?kind=movies compares the watched movies: rows, shared, only theirs
   assert.equal(body.commonCount, 1);
   assert.deepEqual(body.onlyThem.map((m) => [m.id, m.you]), [[505, 80], [504, 150]], 'their most recent first, with runtimes');
   assert.ok(body.similarity > 0 && body.similarity <= 100);
+  // Watch together: unseen movies on both lists (and not the ones one of them has watched).
+  await add(maya.uid, 601, 'Both Want', 100, [28], null);
+  await add(noel.uid, 601, 'Both Want', 100, [28], null);
+  await add(maya.uid, 602, 'Maya Wants', 100, [28], null);
+  await add(noel.uid, 602, 'Maya Wants', 100, [28], '2026-05-01'); // Noel has watched it: not to watch together
+  const together = (await api(maya.uid, 'GET', `/me/social/users/${noel.handle}/compare?kind=movies`)).body;
+  assert.deepEqual(together.watchTogether.map((m) => m.id), [601]);
+  assert.equal(together.watchTogetherCount, 1);
+  assert.ok(together.onlyThem.some((m) => m.id === 602), 'the one only Noel watched is a catch-up');
   // Shows stay the default; an unknown kind is the shows comparison.
   assert.equal((await api(maya.uid, 'GET', `/me/social/users/${noel.handle}/compare`)).body.kind, 'shows');
   assert.equal((await api(maya.uid, 'GET', `/me/social/users/${noel.handle}/compare?kind=nonsense`)).body.kind, 'shows');
+});
+
+test('compare: shows on both watchlists that neither has started are to watch together', async () => {
+  const una = await person('una2', { watched: [[9701, 3]] });
+  const vic = await person('vic2');
+  const listed = (uid, id, name) => pool.query(
+    `INSERT INTO watchlist(firebase_uid, series_id, series) VALUES ($1, $2, $3::jsonb)`,
+    [uid, id, JSON.stringify({ id, name, posterPath: `/${id}.jpg` })],
+  );
+  await listed(una.uid, 9801, 'Both Later');
+  await listed(vic.uid, 9801, 'Both Later');
+  await listed(una.uid, 9802, 'Only Una');
+  await listed(vic.uid, 9701, 'Una Started It'); // on Vic's list, but Una has watched episodes of it
+  await listed(una.uid, 9701, 'Una Started It');
+  const body = (await api(una.uid, 'GET', `/me/social/users/${vic.handle}/compare`)).body;
+  assert.deepEqual(body.watchTogether.map((s) => [s.id, s.name, s.posterPath]), [[9801, 'Both Later', '/9801.jpg']]);
+  assert.equal(body.watchTogetherCount, 1);
 });
 
 test('compare counts every show, not only the most recent 300', async () => {

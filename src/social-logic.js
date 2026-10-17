@@ -74,10 +74,17 @@ const pick = (stats) => ({
 
 const SHOW_LIMIT = 20;
 
+// What both people have on their watchlist and neither has started: the ones to watch together. `card` shapes an item.
+function watchTogether(myWaiting, theirWaiting, card) {
+  const mine = new Set(myWaiting.map((item) => item.id));
+  const both = theirWaiting.filter((item) => mine.has(item.id));
+  return { watchTogether: both.slice(0, SHOW_LIMIT).map(card), watchTogetherCount: both.length };
+}
+
 // The comparison of two people. `myShows` and `theirShows` are [{ id, name, posterPath, episodes }] (episodes watched).
 // Returns both sets of numbers, who is ahead on each, the shows they share, the shows only they watch (the ones with the
 // most episodes first, "watch together"), and the similarity.
-function compare({ myStats, theirStats, myShows, theirShows }) {
+function compare({ myStats, theirStats, myShows, theirShows, myWaiting = [], theirWaiting = [] }) {
   const you = pick(myStats);
   const them = pick(theirStats);
   const rows = Object.keys(you).map((key) => ({
@@ -105,6 +112,7 @@ function compare({ myStats, theirStats, myShows, theirShows }) {
     rows,
     commonShows: common,
     commonCount: [...theirs.keys()].filter((id) => mine.has(id)).length,
+    ...watchTogether(myWaiting, theirWaiting, (item) => card(item, 0, 0)),
     onlyThem,
     similarity: similarity(
       new Map(myShows.map((show) => [show.id, show.episodes])),
@@ -134,7 +142,7 @@ function genreMatch(a, b) {
 // [{ id, name, posterPath, runtime, genres: [ids] }]. Rows: movies, watch time, average length, this year, longest.
 // `commonShows` / `onlyThem` carry movies (kept under those names so the app reads one shape): `you` and `them` are
 // the movie's runtime. The similarity is how alike the genres of the two lists are.
-function compareMovies({ myStats, theirStats, myMovies, theirMovies }) {
+function compareMovies({ myStats, theirStats, myMovies, theirMovies, myWaiting = [], theirWaiting = [] }) {
   const take = (stats) => {
     const movies = stats.movieStats || {};
     return {
@@ -168,6 +176,7 @@ function compareMovies({ myStats, theirStats, myMovies, theirMovies }) {
     rows,
     commonShows: common.slice(0, MOVIE_LIMIT).map(card),
     commonCount: common.length,
+    ...watchTogether(myWaiting, theirWaiting, card),
     onlyThem: theirMovies.filter((movie) => !mine.has(movie.id)).slice(0, MOVIE_LIMIT).map(card),
     similarity: genreMatch(genres(myMovies), genres(theirMovies)),
   };

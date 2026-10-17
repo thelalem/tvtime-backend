@@ -150,3 +150,31 @@ test('compareMovies: nobody watching anything is zeros; the limit is 20; genres 
   assert.equal(genreMatch(new Map([[28, 4]]), new Map([[35, 2]])), 0, 'nothing in common');
   assert.equal(genreMatch(new Map(), new Map([[35, 2]])), 0);
 });
+
+test('watch together: what is on both lists and started by neither, for movies and for shows', () => {
+  const none = { movieStats: { watched: 0, minutes: 0, averageRuntime: 0, thisYear: 0, longest: null } };
+  const waiting = (ids) => ids.map((id) => ({ id, name: `W${id}`, posterPath: null, runtime: 90 + id }));
+  const movies = compareMovies({
+    myStats: none, theirStats: none, myMovies: [], theirMovies: [],
+    myWaiting: waiting([1, 2, 3]), theirWaiting: waiting([3, 4, 1]),
+  });
+  assert.deepEqual(movies.watchTogether.map((m) => [m.id, m.you]), [[3, 93], [1, 91]], 'in their order, with the runtime');
+  assert.equal(movies.watchTogetherCount, 2);
+
+  const quiet = compareMovies({ myStats: none, theirStats: none, myMovies: [], theirMovies: [] });
+  assert.deepEqual(quiet.watchTogether, []);
+  assert.equal(quiet.watchTogetherCount, 0);
+
+  const base = stats();
+  const shows = compare({
+    myStats: base, theirStats: base, myShows: [], theirShows: [],
+    myWaiting: waiting([7, 8]), theirWaiting: waiting([8, 9]),
+  });
+  assert.deepEqual(shows.watchTogether.map((s) => s.id), [8]);
+  assert.equal(shows.watchTogetherCount, 1);
+
+  const many = waiting(Array.from({ length: 30 }, (_, i) => i + 1));
+  const capped = compareMovies({ myStats: none, theirStats: none, myMovies: [], theirMovies: [], myWaiting: many, theirWaiting: many });
+  assert.equal(capped.watchTogether.length, 20);
+  assert.equal(capped.watchTogetherCount, 30, 'the count is all of them');
+});
