@@ -11,6 +11,7 @@ function reset() {
     geminiCalls: [],
     geminiStatus: 200,
     budgetLeft: 100,
+    finishReason: 'STOP',
   });
 }
 reset();
@@ -52,7 +53,7 @@ const stubs = {
         status: state.geminiStatus,
         ok: state.geminiStatus === 200,
         text: async () => 'nope',
-        json: async () => ({ candidates: [{ content: { parts: [{ text: 'thinking', thought: true }, { text: 'Previously on The Show...' }] } }] }),
+        json: async () => ({ candidates: [{ finishReason: state.finishReason, content: { parts: [{ text: 'thinking', thought: true }, { text: 'Previously on The Show...' }] } }] }),
       };
     },
   },
@@ -143,6 +144,11 @@ test('without a key, over the quota or the user limit, or on an error: the synop
   state.geminiStatus = 500;
   assert.equal((await call()).payload.reason, 'error');
   state.geminiStatus = 200;
+
+  state.finishReason = 'MAX_TOKENS';
+  assert.equal((await call()).payload.reason, 'error', 'a cut-off recap is not used');
+  assert.equal(state.cache.size, 0, 'nor kept');
+  state.finishReason = 'STOP';
 
   recap._resetLimits();
   config.recapUserDailyLimit = 1;

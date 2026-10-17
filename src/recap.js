@@ -179,7 +179,9 @@ async function askGemini(prompt) {
     headers: { 'content-type': 'application/json', 'x-goog-api-key': config.geminiApiKey },
     body: JSON.stringify({
       contents: [{ role: 'user', parts: [{ text: prompt }] }],
-      generationConfig: { temperature: 0.4, maxOutputTokens: 2048 },
+      // Newer Flash models think before answering, and the thinking counts against this limit: at 2,048 the
+      // first recaps were cut off mid-sentence.
+      generationConfig: { temperature: 0.4, maxOutputTokens: 8192 },
     }),
     signal: AbortSignal.timeout(GEMINI_TIMEOUT_MS),
   });
@@ -193,8 +195,14 @@ async function askGemini(prompt) {
     throw new Fallback('error');
   }
   const data = await response.json();
-  const parts = (((data.candidates || [])[0] || {}).content || {}).parts || [];
+  const candidate = (data.candidates || [])[0] || {};
+  const parts = (candidate.content || {}).parts || [];
   const text = parts.filter((part) => !part.thought).map((part) => part.text || '').join('').trim();
+  // A recap that ran out of room (or was stopped for any other reason) must not be kept for months.
+  if (candidate.finishReason && candidate.finishReason !== 'STOP') {
+    console.error(`[recap] Gemini stopped with ${candidate.finishReason}`);
+    throw new Fallback('error');
+  }
   if (!text) throw new Fallback('error');
   return text;
 }
@@ -236,7 +244,8 @@ function registerRecapRoutes(router) {
       if (!cutoff) return response.status(404).json({ error: 'nothing_watched' });
       const showName = rows[0].show_name || 'this show';
 
-      const key = `recap:v1:${seriesId}:${scope}:S${cutoff.season}E${cutoff.episode}`;
+      // v2: v1 recaps could be cut off mid-sentence (see askGemini).
+      const key = `recap:v2:${seriesId}:${scope}:S${cutoff.season}E${cutoff.episode}`;
       let material = null;
       const answer = { season: cutoff.season, episode: cutoff.episode, scope };
       try {
