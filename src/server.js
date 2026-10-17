@@ -10,6 +10,7 @@ const {
 const {
   getDiscovery,
   getImdbRatings,
+  getPerson,
   getTvMazeEpisodes,
   getTvMazeShow,
   getTvSeason,
@@ -189,6 +190,17 @@ app.get('/api/v1/shows/:showId/seasons/:seasonNumber', async (request, response,
 
 app.get('/api/v1/shows/:showId/ratings', async (request, response, next) => {
   try { response.json(await getImdbRatings(request.params.showId)); } catch (error) { next(error); }
+});
+
+// An actor's page (people-logic.js). The id goes into the TMDB path, so only plain numbers pass, as for showId.
+// Ratings are TMDB's: a busy actor has hundreds of titles, too many to ask OMDb about.
+app.param('personId', (_request, response, next, value) => {
+  if (/^[1-9]\d{0,9}$/.test(value)) return next();
+  return response.status(400).json({ detail: 'personId must be a positive integer' });
+});
+
+app.get('/api/v1/people/:personId', async (request, response, next) => {
+  try { response.json(await getPerson(request.params.personId)); } catch (error) { next(error); }
 });
 
 app.get('/api/v1/providers/tvmaze/show', async (request, response, next) => {

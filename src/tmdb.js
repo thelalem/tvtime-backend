@@ -2,6 +2,7 @@ const { Agent, fetch } = require('undici');
 const { config } = require('./config');
 const { readThrough } = require('./persistent-cache');
 const { takeOmdbCall } = require('./omdb-budget');
+const { slimPerson } = require('./people-logic');
 
 // TMDB rate-limits per IP, and a classification pass reads one show plus every
 // one of its seasons. Uncapped, a single pull-to-refresh fired hundreds of
@@ -333,6 +334,18 @@ async function getMovie(movieId) {
       append_to_response: 'credits,videos,watch/providers,external_ids',
     }),
     { ttlMs: showCacheTtlMs },
+  );
+}
+
+// An actor (or director...) with their shows, movies, photos and links, already slimmed (people-logic.js) so the
+// cache holds a few KB rather than TMDB's full credit list.
+async function getPerson(personId) {
+  return cachedProviderRead(
+    `person:${personId}`,
+    async () => slimPerson(await tmdbGet(`/person/${personId}`, {
+      append_to_response: 'combined_credits,external_ids,images',
+    })),
+    { ttlMs: recommendationsCacheTtlMs },
   );
 }
 
@@ -878,6 +891,7 @@ module.exports = {
   getMovie,
   getMovieRecommendations,
   getMovieSimilar,
+  getPerson,
   getTvMazeEpisodes,
   getTvMazeShow,
   getTvRecommendations,
