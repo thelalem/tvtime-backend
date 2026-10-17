@@ -217,6 +217,23 @@ test('too little to write from: the synopses, without asking Gemini', async () =
   assert.equal(state.geminiCalls.length, 0);
 });
 
+test('last season: the whole season before the current one, with its overview; none in season 1', async () => {
+  const material = recap.collectMaterial([seasons[1], seasons[2]], { season: 2, episode: 2 }, 'last');
+  assert.deepEqual(material.map((s) => s.season), [1]);
+  assert.deepEqual(material[0].episodes.map((e) => e.number), [1, 2, 3]);
+  assert.equal(material[0].overview, 'Season one tells the whole first year.');
+  const prompt = recap.buildPrompt('The Show', { season: 2, episode: 2 }, 'last', material);
+  assert.match(prompt, /detailed recap of season 1/);
+  assert.match(prompt, /how that season ended/);
+  assert.match(recap.buildPrompt('The Show', { season: 2, episode: 2 }, 'all', material), /Keep it brief/);
+
+  const answer = await call({ scope: 'last' });
+  assert.equal(answer.payload.scope, 'last');
+  assert.ok(!state.geminiCalls[0].body.contents[0].parts[0].text.includes('s2e1'), 'nothing of season 2');
+  state.watched = ['S1E2'];
+  assert.equal((await call({ scope: 'last' })).status, 404);
+});
+
 test('nothing watched is a 404; a bad id is a 400', async () => {
   state.watched = ['S0E1'];
   assert.equal((await call()).status, 404);

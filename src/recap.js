@@ -1,6 +1,8 @@
 // "Where you left off" recaps (FEATURE_PLAN.md section 15).
 //
-//   GET /me/shows/:seriesId/recap?scope=season|all
+//   GET /me/shows/:seriesId/recap?scope=season|last|all
+//   season: this season up to the user's episode, in detail; last: the whole season before it, in detail;
+//   all: the story from the start, kept short (decided with the user).
 //   -> { source: "ai" | "synopses", text, season, episode, scope, reason? }
 //
 // The cutoff is the latest episode the user has watched (read from their progress here, never taken from the
@@ -64,17 +66,24 @@ function plain(text) {
 
 // What the recap may be written from: [{ season, overview, episodes: [{ number, name, overview }] }], seasons in
 // order, cut at the user's episode. `seasons` are TMDB season answers; `tvMaze` TVmaze's episodes (any order).
+// The seasons a scope covers: [first, last].
+function seasonRange(cutoff, scope) {
+  if (scope === 'all') return [1, cutoff.season];
+  if (scope === 'last') return [cutoff.season - 1, cutoff.season - 1];
+  return [cutoff.season, cutoff.season];
+}
+
 function collectMaterial(seasons, cutoff, scope, tvMaze = []) {
   const fromTvMaze = new Map();
   for (const episode of tvMaze || []) {
     const text = plain(episode && episode.summary);
     if (text) fromTvMaze.set(`${episode.season}:${episode.number}`, text);
   }
-  const first = scope === 'all' ? 1 : cutoff.season;
+  const [first, last] = seasonRange(cutoff, scope);
   const material = [];
   for (const season of seasons || []) {
     const number = season && season.season_number;
-    if (!Number.isInteger(number) || number < first || number > cutoff.season) continue;
+    if (!Number.isInteger(number) || number < first || number > last) continue;
     const episodes = (season.episodes || [])
       .filter((episode) => number < cutoff.season || episode.episode_number <= cutoff.episode)
       .sort((a, b) => a.episode_number - b.episode_number)
@@ -106,15 +115,24 @@ function materialText(material) {
 }
 
 function buildPrompt(showName, cutoff, scope, material) {
+  const detail = 'Follow the main storylines in order, name the characters involved and the turning points, so ' +
+    'the viewer can pick up straight away.';
   const shape = scope === 'all'
-    ? `Cover the story from the start: two or three sentences for each earlier season, then a fuller paragraph ` +
-      `(up to about 150 words) for season ${cutoff.season} up to episode ${cutoff.episode}.`
-    : `Cover season ${cutoff.season} up to episode ${cutoff.episode} in about 120 to 200 words.`;
+    ? `Keep it brief, as it covers a lot: one or two sentences per season for the big picture, then three or ` +
+      `four sentences on season ${cutoff.season} up to episode ${cutoff.episode}.`
+    : scope === 'last'
+      ? `Write a detailed recap of season ${cutoff.season - 1}, the season before the one they are in, in about ` +
+        `250 to 400 words. ${detail} End with how that season ended.`
+      : `Write a detailed recap of season ${cutoff.season} up to episode ${cutoff.episode}, in about 250 to 400 ` +
+        `words. ${detail}`;
+  const ending = scope === 'last'
+    ? 'Do not mention anything after that season.'
+    : 'End with where the last watched episode left off, so they know where they are.';
   return [
     `Write a "previously on" recap of the TV show "${showName}" for a viewer who has watched up to ` +
       `season ${cutoff.season}, episode ${cutoff.episode} and is coming back after a break.`,
     shape,
-    'End with where the last watched episode left off, so they know where they are.',
+    ending,
     'Use only the episode descriptions below. Do not add events, characters or details that are not in them, ' +
       'and never hint at what happens later. If the descriptions are thin, keep the recap short rather than ' +
       'filling gaps.',
@@ -287,7 +305,8 @@ function parseId(value) {
 
 async function loadMaterial(seriesId, showName, cutoff, scope) {
   const numbers = [];
-  for (let n = scope === 'all' ? 1 : cutoff.season; n <= cutoff.season; n += 1) numbers.push(n);
+  const [first, last] = seasonRange(cutoff, scope);
+  for (let n = first; n <= last; n += 1) numbers.push(n);
   const seasons = (await Promise.all(numbers.map((n) => getTvSeason(seriesId, n).catch(() => null))))
     .filter(Boolean);
   let material = collectMaterial(seasons, cutoff, scope);
@@ -303,7 +322,7 @@ function registerRecapRoutes(router) {
   router.get('/me/shows/:seriesId/recap', async (request, response, next) => {
     const seriesId = parseId(request.params.seriesId);
     if (!seriesId) return response.status(400).json({ error: 'invalid_series_id' });
-    const scope = request.query.scope === 'all' ? 'all' : 'season';
+    const scope = ['all', 'last'].includes(request.query.scope) ? request.query.scope : 'season';
     try {
       const { rows } = await pool.query(
         'SELECT watched_episodes, show_name FROM show_progress WHERE firebase_uid=$1 AND series_id=$2',
@@ -311,10 +330,11 @@ function registerRecapRoutes(router) {
       );
       const cutoff = rows.length ? latestWatched(rows[0].watched_episodes) : null;
       if (!cutoff) return response.status(404).json({ error: 'nothing_watched' });
+      if (scope === 'last' && cutoff.season < 2) return response.status(404).json({ error: 'no_last_season' });
       const showName = rows[0].show_name || 'this show';
 
-      // v2: v1 recaps could be cut off mid-sentence (see askGemini).
-      const key = `recap:v2:${seriesId}:${scope}:S${cutoff.season}E${cutoff.episode}`;
+      // v3: v1 recaps could be cut off mid-sentence (see askGemini); v2 had shorter season recaps.
+      const key = `recap:v3:${seriesId}:${scope}:S${cutoff.season}E${cutoff.episode}`;
       let material = null;
       const answer = { season: cutoff.season, episode: cutoff.episode, scope };
       try {

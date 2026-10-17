@@ -56,7 +56,7 @@ The PostgreSQL tables are created on startup. User-data endpoints live under
 - `GET`, `PATCH /api/v1/me`. `PATCH` accepts `displayName` and `timezone` (an
   IANA name such as `Africa/Addis_Ababa`; invalid names get a 400). The app
   reports `timezone` on sign-in and each time it returns to the foreground.
-- `GET /api/v1/me/shows/:showId/recap?scope=season|all` returns a "where you left off" recap up to the
+- `GET /api/v1/me/shows/:showId/recap?scope=season|last|all` returns a "where you left off" recap up to the
   user's latest watched episode (`src/recap.js`): `{ source: "ai" | "synopses", text, season, episode,
   scope, reason? }`. Written by Gemini (`GEMINI_API_KEY`, `GEMINI_MODEL`, default `gemini-flash-latest`)
   from TMDB/TVmaze episode synopses and cached per show and episode; `GEMINI_DAILY_BUDGET` (200) model
