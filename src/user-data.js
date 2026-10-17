@@ -15,6 +15,7 @@ const {
 const { sendJsonWithEtag } = require('./etag');
 const { PROGRESS_COLUMNS } = require('./progress-columns');
 const { registerRewatchRoutes } = require('./rewatches');
+const { registerRecapRoutes } = require('./recap');
 const { registerImportResolveRoute } = require('./import-resolve');
 const { registerStatsRoutes } = require('./stats');
 const { cleanRewatches, reconcilePasses } = require('./rewatch-logic');
@@ -73,6 +74,7 @@ registerMeMovieRoutes(router);
 registerShowStateRoutes(router);
 registerNotificationRoutes(router);
 registerRewatchRoutes(router);
+registerRecapRoutes(router);
 registerImportResolveRoute(router);
 registerStatsRoutes(router);
 registerEpisodeDataRoutes(router);

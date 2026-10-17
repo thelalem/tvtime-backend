@@ -13,6 +13,14 @@ const config = {
   omdbDailyBudget: Number(process.env.OMDB_DAILY_BUDGET) || 900,
   omdbListBudget: Number(process.env.OMDB_LIST_BUDGET) ||
     Math.floor((Number(process.env.OMDB_DAILY_BUDGET) || 900) * 0.6),
+  // Recaps (recap.js, FEATURE_PLAN.md section 15). Gemini's free limits move and Google no longer publishes a
+  // fixed table: GEMINI_MODEL picks the model, GEMINI_DAILY_BUDGET caps model calls a UTC day for everyone,
+  // RECAP_USER_DAILY_LIMIT per person. A cached recap costs nothing.
+  geminiApiKey: process.env.GEMINI_API_KEY,
+  geminiModel: process.env.GEMINI_MODEL || 'gemini-flash-latest',
+  geminiBaseUrl: process.env.GEMINI_BASE_URL || 'https://generativelanguage.googleapis.com/v1beta',
+  geminiDailyBudget: Number(process.env.GEMINI_DAILY_BUDGET) || 200,
+  recapUserDailyLimit: Number(process.env.RECAP_USER_DAILY_LIMIT) || 15,
   tvMazeBaseUrl: process.env.TVMAZE_BASE_URL || 'https://api.tvmaze.com',
   corsAllowedOrigins: (process.env.CORS_ALLOWED_ORIGINS || '')
     .split(',')

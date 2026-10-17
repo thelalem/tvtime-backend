@@ -56,6 +56,12 @@ The PostgreSQL tables are created on startup. User-data endpoints live under
 - `GET`, `PATCH /api/v1/me`. `PATCH` accepts `displayName` and `timezone` (an
   IANA name such as `Africa/Addis_Ababa`; invalid names get a 400). The app
   reports `timezone` on sign-in and each time it returns to the foreground.
+- `GET /api/v1/me/shows/:showId/recap?scope=season|all` returns a "where you left off" recap up to the
+  user's latest watched episode (`src/recap.js`): `{ source: "ai" | "synopses", text, season, episode,
+  scope, reason? }`. Written by Gemini (`GEMINI_API_KEY`, `GEMINI_MODEL`, default `gemini-flash-latest`)
+  from TMDB/TVmaze episode synopses and cached per show and episode; `GEMINI_DAILY_BUDGET` (200) model
+  calls a UTC day in all (table `ai_usage`) and `RECAP_USER_DAILY_LIMIT` (15) per user. Without a key, over
+  a limit, on an error or with too little text, the answer is the synopses (`reason` says why).
 - `DELETE /api/v1/me` with `{ "confirm": "delete" }` deletes everything the server holds for
   the account (204; 400 `confirm_required` without the body). The Firebase sign-in is not
   touched; the next request starts with an empty account.

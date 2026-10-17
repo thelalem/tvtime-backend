@@ -212,6 +212,11 @@ async function initializeDatabase() {
       day DATE PRIMARY KEY,
       calls INTEGER NOT NULL
     );
+
+    CREATE TABLE IF NOT EXISTS ai_usage (
+      day DATE PRIMARY KEY,
+      calls INTEGER NOT NULL
+    );
   `);
 }
 
