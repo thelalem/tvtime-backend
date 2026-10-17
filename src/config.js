@@ -18,6 +18,8 @@ const config = {
   // RECAP_USER_DAILY_LIMIT per person (one count per recap, whichever writer). A cached recap costs nothing.
   geminiApiKey: process.env.GEMINI_API_KEY,
   geminiModel: process.env.GEMINI_MODEL || 'gemini-flash-latest',
+  // The first backup: another Gemini model on the same key (Google counts each model's free quota apart).
+  geminiBackupModel: process.env.GEMINI_BACKUP_MODEL || 'gemini-flash-lite-latest',
   geminiBaseUrl: process.env.GEMINI_BASE_URL || 'https://generativelanguage.googleapis.com/v1beta',
   geminiDailyBudget: Number(process.env.GEMINI_DAILY_BUDGET) || 200,
   recapUserDailyLimit: Number(process.env.RECAP_USER_DAILY_LIMIT) || 15,

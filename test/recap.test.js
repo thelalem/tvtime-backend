@@ -60,9 +60,10 @@ const stubs = {
         };
       }
       state.geminiCalls.push({ url, body: JSON.parse(options.body), key: options.headers['x-goog-api-key'] });
+      const status = String(url).includes('lite-test') && state.liteStatus ? state.liteStatus : state.geminiStatus;
       return {
-        status: state.geminiStatus,
-        ok: state.geminiStatus === 200,
+        status,
+        ok: status === 200,
         text: async () => 'nope',
         json: async () => ({ candidates: [{ finishReason: state.finishReason, content: { parts: [{ text: 'thinking', thought: true }, { text: 'Previously on The Show...' }] } }] }),
       };
@@ -93,11 +94,29 @@ test.beforeEach(() => {
   recap._resetLimits();
   config.geminiApiKey = 'test-key';
   config.geminiModel = 'gemini-test';
+  config.geminiBackupModel = 'lite-test';
+  state.liteStatus = null;
   config.recapUserDailyLimit = 15;
   config.geminiDailyBudget = 200;
   config.groqApiKey = '';
   config.groqModel = 'groq-test';
   config.groqBaseUrl = 'https://groq.test/openai/v1';
+});
+
+test('Gemini Flash-Lite writes it when Flash is out of quota, before Groq is asked', async () => {
+  config.groqApiKey = 'groq-key';
+  state.geminiStatus = 429;
+  state.liteStatus = 200;
+  const answer = await call({ scope: 'season' }, 'l1');
+  assert.equal(answer.payload.model, 'lite-test');
+  assert.deepEqual(state.geminiCalls.map((c) => /lite-test/.test(c.url)), [false, true]);
+  assert.equal(state.groqCalls.length, 0);
+
+  recap._resetLimits();
+  state.cache.clear();
+  state.geminiStatus = 200;
+  const first = await call({ scope: 'season', writer: 'lite' }, 'l2');
+  assert.equal(first.payload.model, 'lite-test', 'writer=lite asks it first');
 });
 
 test('Groq writes it when Gemini is out of quota, fails or has no key; both failing gives the synopses', async () => {

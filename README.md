@@ -61,7 +61,8 @@ The PostgreSQL tables are created on startup. User-data endpoints live under
   scope, reason? }`. Written by Gemini (`GEMINI_API_KEY`, `GEMINI_MODEL`, default `gemini-flash-latest`)
   from TMDB/TVmaze episode synopses and cached per show and episode; `GEMINI_DAILY_BUDGET` (200) model
   calls a UTC day in all (table `ai_usage`) and `RECAP_USER_DAILY_LIMIT` (15) per user. Without a key, over
-  a limit, on an error or when Gemini takes over 60 s, Groq writes it instead if `GROQ_API_KEY` is set
+  a limit, on an error or when it is too slow, Gemini Flash-Lite (`GEMINI_BACKUP_MODEL`, default
+  `gemini-flash-lite-latest`, same key) writes it, then Groq if `GROQ_API_KEY` is set
   (`GROQ_MODEL`, default `openai/gpt-oss-120b`); with neither, or too little text, the answer is the synopses
   (`reason` says why).
 - `DELETE /api/v1/me` with `{ "confirm": "delete" }` deletes everything the server holds for
