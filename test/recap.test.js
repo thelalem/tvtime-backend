@@ -276,3 +276,39 @@ test('nothing watched is a 404; a bad id is a 400', async () => {
   assert.equal((await call()).status, 404);
   assert.equal((await call({}, 'u1', 'abc')).status, 400);
 });
+
+test('a recap every writer failed on is not asked for again for a while; the synopses show meanwhile', async () => {
+  state.finishReason = 'SAFETY';
+  const first = await call({ scope: 'season' }, 'f1');
+  assert.equal(first.payload.source, 'synopses');
+  const calls = state.geminiCalls.length;
+  assert.ok(calls >= 1);
+
+  const again = await call({ scope: 'season' }, 'f2');
+  assert.equal(again.payload.source, 'synopses');
+  assert.equal(state.geminiCalls.length, calls, 'no new paid call for the same recap');
+
+  // Another point of the show is its own recap and is still asked for.
+  state.watched = [...state.watched, 'S2E3'];
+  await call({ scope: 'season' }, 'f3');
+  assert.ok(state.geminiCalls.length > calls);
+
+  // A writer=... check still asks.
+  state.watched = state.watched.filter((key) => key !== 'S2E3');
+  const before = state.geminiCalls.length;
+  await call({ scope: 'season', writer: 'gemini' }, 'f4');
+  assert.ok(state.geminiCalls.length > before);
+});
+
+test('running out of quota is not remembered as a failure', async () => {
+  state.geminiStatus = 429;
+  state.liteStatus = 429;
+  assert.equal((await call({ scope: 'season' }, 'q1')).payload.source, 'synopses');
+  assert.equal(recap._failedRecaps(), 0, 'the writers are paused instead, and asked again when the pause ends');
+  state.finishReason = 'MAX_TOKENS';
+  state.geminiStatus = 200;
+  state.liteStatus = null;
+  recap._resetLimits();
+  await call({ scope: 'season' }, 'q2');
+  assert.equal(recap._failedRecaps(), 1, 'a cut-off answer is');
+});

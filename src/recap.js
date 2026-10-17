@@ -345,6 +345,27 @@ async function writeRecap(prompt, { first = null, notes = null } = {}) {
 
 const inFlight = new Map();
 
+// Recaps every writer failed on for a reason other than quota (a safety stop, an answer cut off): asked again at once,
+// they would most likely fail again, and each try is paid for, by every user at that point of the show. Such a key
+// gets the synopses for FAILED_RECAP_MS before the writers are tried again. Kept in memory: a restart only means one
+// more try.
+const FAILED_RECAP_MS = 3 * 60 * 60 * 1000;
+const failedUntil = new Map(); // key -> ms
+function recentlyFailed(key, now = Date.now()) {
+  const until = failedUntil.get(key);
+  if (until === undefined) return false;
+  if (until > now) return true;
+  failedUntil.delete(key);
+  return false;
+}
+function rememberFailure(key, now = Date.now()) {
+  if (failedUntil.size >= 5000) {
+    for (const [known, until] of failedUntil) if (until <= now) failedUntil.delete(known);
+    if (failedUntil.size >= 5000) failedUntil.clear();
+  }
+  failedUntil.set(key, now + FAILED_RECAP_MS);
+}
+
 function parseId(value) {
   const id = Number.parseInt(value, 10);
   return Number.isSafeInteger(id) && id > 0 && String(id) === String(value) ? id : null;
@@ -397,15 +418,22 @@ function registerRecapRoutes(router) {
         let pending = inFlight.get(key);
         if (!pending) {
           pending = readThrough(key, CACHE_TTL_MS, async () => {
+            // A writer=... check always asks the writers.
+            if (!first && recentlyFailed(key)) throw new Fallback('error');
             material = await loadMaterial(seriesId, showName, cutoff, scope);
             if (materialChars(material) < MIN_MATERIAL_CHARS) throw new Fallback('thin');
             if (!config.geminiApiKey && !config.groqApiKey) throw new Fallback('no_key');
             if (!takeUserCall(request.user.uid, config.recapUserDailyLimit)) throw new Fallback('limit');
             if (!(await takeBudgetCall(config.geminiDailyBudget))) throw new Fallback('quota');
-            return writeRecap(buildPrompt(showName, cutoff, scope, material), {
-              first,
-              notes: first ? writerNotes : null,
-            });
+            try {
+              return await writeRecap(buildPrompt(showName, cutoff, scope, material), {
+                first,
+                notes: first ? writerNotes : null,
+              });
+            } catch (error) {
+              if (error instanceof Fallback && error.reason === 'error') rememberFailure(key);
+              throw error;
+            }
           });
           inFlight.set(key, pending);
           pending.finally(() => inFlight.delete(key)).catch(() => {});
@@ -432,5 +460,8 @@ function registerRecapRoutes(router) {
 
 module.exports = {
   registerRecapRoutes, latestWatched, collectMaterial, buildPrompt, stitchSynopses, materialChars,
-  _resetLimits: () => { pausedUntil.gemini = 0; pausedUntil.lite = 0; pausedUntil.groq = 0; userCalls.clear(); },
+  _resetLimits: () => {
+    pausedUntil.gemini = 0; pausedUntil.lite = 0; pausedUntil.groq = 0; userCalls.clear(); failedUntil.clear();
+  },
+  _failedRecaps: () => failedUntil.size,
 };
