@@ -20,6 +20,8 @@ const BULK_LIMIT = 3;
 const MINUTE_MS = 60 * 1000;
 const FALLBACK_RUNTIME = 42;
 const TOP_COUNT = 5;
+const WEEKS = 12;
+const PACE_WEEKS = 8;
 
 const formatters = new Map();
 function dayOf(ms, timeZone) {
@@ -44,6 +46,17 @@ function dayOf(ms, timeZone) {
 // The day after a YYYY-MM-DD, as YYYY-MM-DD (calendar arithmetic, no timezone involved).
 function nextDay(date) {
   return new Date(Date.parse(`${date}T00:00:00Z`) + 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+}
+
+// A YYYY-MM-DD moved by `count` days (calendar arithmetic, no timezone involved).
+function addDays(date, count) {
+  return new Date(Date.parse(`${date}T00:00:00Z`) + count * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+}
+
+// The Monday of the week a YYYY-MM-DD is in.
+function weekStart(date) {
+  const weekday = new Date(Date.parse(`${date}T00:00:00Z`)).getUTCDay(); // 0 = Sunday
+  return addDays(date, -((weekday + 6) % 7));
 }
 
 function dayNumber(date) {
@@ -122,7 +135,23 @@ function currentRun(days, today) {
   return length;
 }
 
-function computeStats({ shows = [], movies = [], timezone = 'UTC', now = new Date() } = {}) {
+// The most common names in `lists` (each an array of names), as [{ name, shows }].
+function topNames(lists) {
+  const counts = new Map();
+  for (const list of lists) {
+    for (const name of new Set(Array.isArray(list) ? list : [])) {
+      if (typeof name === 'string' && name) counts.set(name, (counts.get(name) || 0) + 1);
+    }
+  }
+  return [...counts.entries()]
+    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+    .slice(0, TOP_COUNT)
+    .map(([name, shows]) => ({ name, shows }));
+}
+
+function computeStats({
+  shows = [], movies = [], timezone = 'UTC', now = new Date(), library = null, ratings = null,
+} = {}) {
   const { events, bulk } = episodeEvents(shows);
   const today = dayOf(now.getTime(), timezone);
 
@@ -155,6 +184,17 @@ function computeStats({ shows = [], movies = [], timezone = 'UTC', now = new Dat
     if (!months.has(key)) months.set(key, { month: key, episodes: 0, rewatches: 0, movies: 0, minutes: 0 });
     return months.get(key);
   };
+  // Activity (bulk checks left out): the last 12 weeks Monday to Sunday, the last 7 days, and the pace over 8 weeks.
+  const thisWeek = weekStart(today);
+  const weekBuckets = new Map();
+  for (let i = WEEKS - 1; i >= 0; i -= 1) {
+    const start = addDays(thisWeek, -7 * i);
+    weekBuckets.set(start, { start, episodes: 0, minutes: 0 });
+  }
+  const last7 = { episodes: 0, minutes: 0 };
+  const sevenFrom = addDays(today, -6);
+  const paceFrom = addDays(today, -(PACE_WEEKS * 7 - 1));
+  let paceEpisodes = 0;
   let first = null;
   let latest = null;
   for (const event of events) {
@@ -164,6 +204,18 @@ function computeStats({ shows = [], movies = [], timezone = 'UTC', now = new Dat
       const id = `${event.show.showId}:${day}`;
       if (!binge.has(id)) binge.set(id, { show: event.show, day, keys: new Set() });
       binge.get(id).keys.add(event.key);
+      if (!isSpecial(event.key)) {
+        const week = weekBuckets.get(weekStart(day));
+        if (week) {
+          week.episodes += 1;
+          week.minutes += runtimeOf(event.show);
+        }
+        if (day >= sevenFrom && day <= today) {
+          last7.episodes += 1;
+          last7.minutes += runtimeOf(event.show);
+        }
+        if (!event.rewatch && day >= paceFrom && day <= today) paceEpisodes += 1;
+      }
     }
     if (!isSpecial(event.key)) {
       const bucket = month(day.slice(0, 7));
@@ -188,12 +240,22 @@ function computeStats({ shows = [], movies = [], timezone = 'UTC', now = new Dat
   }
 
   let biggestBinge = null;
+  const bestDay = new Map(); // each show's best day
   for (const entry of binge.values()) {
     const count = [...entry.keys].filter((key) => !isSpecial(key)).length;
     if (count > 0 && (!biggestBinge || count > biggestBinge.episodes)) {
       biggestBinge = { episodes: count, showId: entry.show.showId, showName: entry.show.name, date: entry.day };
     }
+    const best = bestDay.get(entry.show.showId);
+    if (count > 0 && (!best || count > best.episodes)) bestDay.set(entry.show.showId, { show: entry.show, episodes: count, date: entry.day });
   }
+  const marathons = [...bestDay.values()]
+    .sort((a, b) => b.episodes - a.episodes || a.date.localeCompare(b.date))
+    .slice(0, TOP_COUNT)
+    .map(({ show, episodes: count, date }) => ({
+      showId: show.showId, name: show.name, posterPath: show.posterPath || null,
+      episodes: count, minutes: count * runtimeOf(show), date,
+    }));
 
   // Months in order, with the empty ones between the first and the last filled in.
   const monthList = [...months.values()].sort((a, b) => a.month.localeCompare(b.month));
@@ -225,6 +287,26 @@ function computeStats({ shows = [], movies = [], timezone = 'UTC', now = new Dat
   const mostRewatched = shaped.filter((entry) => entry.rewatches > 0)
     .sort((a, b) => b.rewatches - a.rewatches).slice(0, TOP_COUNT).map(card);
 
+  // What is left to watch: aired episodes not yet watched, on shows that were started and are still active.
+  let remaining = 0;
+  let remainingShows = 0;
+  let remainingMinutes = 0;
+  let unknownShows = 0;
+  for (const show of shows) {
+    if (show.active === false || !(show.watched || []).length) continue;
+    if (!Number.isFinite(show.unwatchedReleased)) {
+      unknownShows += 1;
+      continue;
+    }
+    if (show.unwatchedReleased > 0) {
+      remaining += show.unwatchedReleased;
+      remainingShows += 1;
+      remainingMinutes += show.unwatchedReleased * runtimeOf(show);
+    }
+  }
+  const pace = paceEpisodes / PACE_WEEKS; // episodes a week, over the last 8 weeks
+  const daysToCatchUp = pace > 0 && remaining > 0 ? Math.ceil((remaining / pace) * 7) : null;
+
   const describe = (watch) => (watch ? { date: watch.day, kind: watch.kind, title: watch.title, key: watch.key } : null);
   return {
     timezone,
@@ -251,7 +333,22 @@ function computeStats({ shows = [], movies = [], timezone = 'UTC', now = new Dat
     topShows,
     mostRewatched,
     bulkEpisodes: bulk,
+    last7Days: last7,
+    weeks: [...weekBuckets.values()],
+    marathons,
+    topGenres: topNames(shaped.map((entry) => entry.show.genres)),
+    topNetworks: topNames(shaped.map((entry) => entry.show.networks)),
+    backlog: {
+      remainingEpisodes: remaining,
+      shows: remainingShows,
+      minutes: remainingMinutes,
+      episodesPerWeek: Math.round(pace * 100) / 100,
+      catchUpDate: daysToCatchUp !== null && daysToCatchUp < 36500 ? addDays(today, daysToCatchUp) : null,
+      unknownShows,
+    },
+    library,
+    ratings,
   };
 }
 
-module.exports = { BULK_LIMIT, FALLBACK_RUNTIME, computeStats, dayOf, nextDay };
+module.exports = { BULK_LIMIT, FALLBACK_RUNTIME, addDays, computeStats, dayOf, nextDay, weekStart };

@@ -26,7 +26,7 @@ const stubs = {
         return { seasons: [{ season_number: 0, episode_count: 3 }, { season_number: 1, episode_count: 5 }],
           episode_run_time: [], last_episode_to_air: { runtime: 90 } };
       }
-      return { seasons: [], status: 'Ended', episode_run_time: [30] };
+      return { seasons: [], status: 'Ended', episode_run_time: [30], genres: [{ name: 'Drama' }], networks: [{ name: 'Netflix' }] };
     },
   },
   './upcoming': { getUpcomingEpisodes: async () => [] },
@@ -137,4 +137,36 @@ test('stats: a show with no episode_run_time uses the median of its first season
   const { body } = await api(uid, 'GET', '/me/stats');
   assert.equal(body.totals.minutes.episodes, 2 * 22, 'median of 20, 22, 22, 90 is 22');
   assert.equal(body.approximate, false);
+});
+
+test('stats v2: weeks, backlog, library, ratings, genres through the real tables', async () => {
+  const uid = newUser();
+  const today = new Date().toISOString().slice(0, 10);
+  assert.equal((await imported(uid, 9301, [
+    { key: 'S1E1', watched: true, at: `${today}T01:00:00Z` },
+    { key: 'S1E2', watched: true, at: `${today}T03:00:00Z` },
+  ])).status, 200);
+  assert.equal((await imported(uid, 9302, [{ key: 'S1E1', watched: true, at: `${today}T05:00:00Z` }])).status, 200);
+  // The backend works out how many aired episodes are left; fix it here so the numbers are known.
+  await pool.query(
+    `UPDATE show_progress SET unwatched_released_count = 7, is_ended = (series_id = 9302)
+     WHERE firebase_uid = $1 AND series_id = ANY($2)`,
+    [uid, [9301, 9302]],
+  );
+  await pool.query(`INSERT INTO show_states(firebase_uid, series_id, state, series) VALUES ($1, 9302, 'stopped', '{}'::jsonb)`, [uid]);
+  await pool.query(
+    `INSERT INTO episode_user_data(firebase_uid, series_id, season, episode, rating) VALUES ($1, 9301, 1, 1, 5), ($1, 9301, 1, 2, 4), ($1, 9302, 1, 1, 3)`,
+    [uid],
+  );
+  const { body } = await api(uid, 'GET', '/me/stats');
+  assert.equal(body.weeks.length, 12);
+  assert.equal(body.weeks[11].episodes, 3, 'three watches today, in the current week');
+  assert.equal(body.last7Days.episodes, 3);
+  assert.equal(body.backlog.remainingEpisodes, 7, 'the stopped show is not counted');
+  assert.equal(body.backlog.shows, 1);
+  assert.deepEqual(body.library, { added: 2, inProduction: 1 });
+  assert.deepEqual(body.ratings, { count: 3, shows: 2 });
+  assert.deepEqual(body.topGenres, [{ name: 'Drama', shows: 2 }]);
+  assert.deepEqual(body.topNetworks, [{ name: 'Netflix', shows: 2 }]);
+  assert.equal(body.marathons[0].episodes, 2);
 });
