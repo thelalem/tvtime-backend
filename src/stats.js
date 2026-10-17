@@ -9,7 +9,9 @@ const { computeStats } = require('./stats-logic');
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const FACTS_TTL_MS = 30 * DAY_MS;
-const FACTS_LOOKUP_BUDGET_MS = 8000;
+// Shorter than the app's request limit (about 6 seconds), so a first look at a big library answers in time with what it has
+// (`approximate`) and the app asks again, instead of the app giving up on a request that is still running.
+const FACTS_LOOKUP_BUDGET_MS = 3500;
 const FACTS_CONCURRENCY = 6;
 const CACHE_MS = 60 * 1000;
 
