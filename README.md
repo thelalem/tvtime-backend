@@ -61,7 +61,9 @@ The PostgreSQL tables are created on startup. User-data endpoints live under
   scope, reason? }`. Written by Gemini (`GEMINI_API_KEY`, `GEMINI_MODEL`, default `gemini-flash-latest`)
   from TMDB/TVmaze episode synopses and cached per show and episode; `GEMINI_DAILY_BUDGET` (200) model
   calls a UTC day in all (table `ai_usage`) and `RECAP_USER_DAILY_LIMIT` (15) per user. Without a key, over
-  a limit, on an error or with too little text, the answer is the synopses (`reason` says why).
+  a limit, on an error or when Gemini takes over 60 s, Groq writes it instead if `GROQ_API_KEY` is set
+  (`GROQ_MODEL`, default `llama-3.3-70b-versatile`); with neither, or too little text, the answer is the synopses
+  (`reason` says why).
 - `DELETE /api/v1/me` with `{ "confirm": "delete" }` deletes everything the server holds for
   the account (204; 400 `confirm_required` without the body). The Firebase sign-in is not
   touched; the next request starts with an empty account.

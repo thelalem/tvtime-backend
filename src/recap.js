@@ -10,7 +10,8 @@
 //
 // Gemini writes the recap from that material. A recap depends only on (show, scope, episode), so it is kept in
 // `provider_cache` and shared by everyone at that point. Without a key, over the daily budget, over the user's
-// own limit, on an error, or when the synopses are too thin to write from, the answer is the synopses themselves
+// own limit, on an error, or when the synopses are too thin to write from, Groq is asked instead (when it has a
+// key), and when that fails too the answer is the synopses themselves
 // (`source: "synopses"`, with `reason`), which is not cached.
 const { fetch } = require('undici');
 const { pool } = require('./db');
@@ -19,7 +20,11 @@ const { readThrough } = require('./persistent-cache');
 const { getTvMazeEpisodes, getTvSeason } = require('./tmdb');
 
 const CACHE_TTL_MS = 180 * 24 * 60 * 60 * 1000;
-const GEMINI_TIMEOUT_MS = 30 * 1000;
+// A long show's whole story took over 30 s with a thinking Flash model; Cloudflare in front gives up at 100 s,
+// so with Groq behind it Gemini gets 60 s and Groq (fast) the rest.
+const GEMINI_TIMEOUT_MS = 90 * 1000;
+const GEMINI_TIMEOUT_WITH_BACKUP_MS = 60 * 1000;
+const GROQ_TIMEOUT_MS = 30 * 1000;
 // After Gemini reports its quota spent, it is left alone for this long.
 const QUOTA_PAUSE_MS = 30 * 60 * 1000;
 // Less material than this is not worth a model call (it would have to invent).
@@ -133,7 +138,8 @@ function stitchSynopses(material) {
 
 // --- limits -------------------------------------------------------------------------------------
 
-let quotaPausedUntil = 0;
+// Per provider: after one reports its quota spent, it is left alone for QUOTA_PAUSE_MS.
+const pausedUntil = { gemini: 0, groq: 0 };
 const userCalls = new Map();
 
 function utcDay(now = new Date()) {
@@ -171,7 +177,7 @@ async function takeBudgetCall(limit) {
   }
 }
 
-async function askGemini(prompt) {
+async function askGemini(prompt, timeoutMs) {
   const base = config.geminiBaseUrl.replace(/\/$/, '');
   const url = `${base}/models/${encodeURIComponent(config.geminiModel)}:generateContent`;
   const response = await fetch(url, {
@@ -183,10 +189,10 @@ async function askGemini(prompt) {
       // first recaps were cut off mid-sentence.
       generationConfig: { temperature: 0.4, maxOutputTokens: 8192 },
     }),
-    signal: AbortSignal.timeout(GEMINI_TIMEOUT_MS),
+    signal: AbortSignal.timeout(timeoutMs),
   });
   if (response.status === 429) {
-    quotaPausedUntil = Date.now() + QUOTA_PAUSE_MS;
+    pausedUntil.gemini = Date.now() + QUOTA_PAUSE_MS;
     throw new Fallback('quota');
   }
   if (!response.ok) {
@@ -205,6 +211,69 @@ async function askGemini(prompt) {
   }
   if (!text) throw new Fallback('error');
   return text;
+}
+
+// Groq's OpenAI-style chat API: the backup writer.
+async function askGroq(prompt) {
+  const response = await fetch(`${config.groqBaseUrl.replace(/\/$/, '')}/chat/completions`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', authorization: `Bearer ${config.groqApiKey}` },
+    body: JSON.stringify({
+      model: config.groqModel,
+      messages: [{ role: 'user', content: prompt }],
+      temperature: 0.4,
+      max_tokens: 2048,
+    }),
+    signal: AbortSignal.timeout(GROQ_TIMEOUT_MS),
+  });
+  if (response.status === 429) {
+    pausedUntil.groq = Date.now() + QUOTA_PAUSE_MS;
+    throw new Fallback('quota');
+  }
+  if (!response.ok) {
+    const detail = await response.text().catch(() => '');
+    console.error(`[recap] Groq answered ${response.status}: ${detail.slice(0, 300)}`);
+    throw new Fallback('error');
+  }
+  const data = await response.json();
+  const choice = (data.choices || [])[0] || {};
+  const text = String((choice.message || {}).content || '').trim();
+  if (choice.finish_reason && choice.finish_reason !== 'stop') {
+    console.error(`[recap] Groq stopped with ${choice.finish_reason}`);
+    throw new Fallback('error');
+  }
+  if (!text) throw new Fallback('error');
+  return text;
+}
+
+// Gemini, then Groq. Throws a Fallback with the reason when neither wrote it ('quota' when one was out of
+// quota, else 'error').
+async function writeRecap(prompt) {
+  const reasons = [];
+  const now = Date.now();
+  const groqReady = Boolean(config.groqApiKey) && now >= pausedUntil.groq;
+  if (config.geminiApiKey && now >= pausedUntil.gemini) {
+    try {
+      const timeout = groqReady ? GEMINI_TIMEOUT_WITH_BACKUP_MS : GEMINI_TIMEOUT_MS;
+      return { text: await askGemini(prompt, timeout), model: config.geminiModel };
+    } catch (error) {
+      if (!(error instanceof Fallback)) console.error(`[recap] Gemini failed: ${error.message}`);
+      reasons.push(error instanceof Fallback ? error.reason : 'error');
+    }
+  } else if (config.geminiApiKey) {
+    reasons.push('quota');
+  }
+  if (groqReady) {
+    try {
+      return { text: await askGroq(prompt), model: config.groqModel };
+    } catch (error) {
+      if (!(error instanceof Fallback)) console.error(`[recap] Groq failed: ${error.message}`);
+      reasons.push(error instanceof Fallback ? error.reason : 'error');
+    }
+  } else if (config.groqApiKey) {
+    reasons.push('quota');
+  }
+  throw new Fallback(reasons.includes('quota') ? 'quota' : 'error');
 }
 
 // --- the route ----------------------------------------------------------------------------------
@@ -255,11 +324,10 @@ function registerRecapRoutes(router) {
           pending = readThrough(key, CACHE_TTL_MS, async () => {
             material = await loadMaterial(seriesId, showName, cutoff, scope);
             if (materialChars(material) < MIN_MATERIAL_CHARS) throw new Fallback('thin');
-            if (!config.geminiApiKey) throw new Fallback('no_key');
-            if (Date.now() < quotaPausedUntil) throw new Fallback('quota');
+            if (!config.geminiApiKey && !config.groqApiKey) throw new Fallback('no_key');
             if (!takeUserCall(request.user.uid, config.recapUserDailyLimit)) throw new Fallback('limit');
             if (!(await takeBudgetCall(config.geminiDailyBudget))) throw new Fallback('quota');
-            return { text: await askGemini(buildPrompt(showName, cutoff, scope, material)), model: config.geminiModel };
+            return writeRecap(buildPrompt(showName, cutoff, scope, material));
           });
           inFlight.set(key, pending);
           pending.finally(() => inFlight.delete(key)).catch(() => {});
@@ -280,5 +348,5 @@ function registerRecapRoutes(router) {
 
 module.exports = {
   registerRecapRoutes, latestWatched, collectMaterial, buildPrompt, stitchSynopses, materialChars,
-  _resetLimits: () => { quotaPausedUntil = 0; userCalls.clear(); },
+  _resetLimits: () => { pausedUntil.gemini = 0; pausedUntil.groq = 0; userCalls.clear(); },
 };

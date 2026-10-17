@@ -12,6 +12,8 @@ function reset() {
     geminiStatus: 200,
     budgetLeft: 100,
     finishReason: 'STOP',
+    groqCalls: [],
+    groqStatus: 200,
   });
 }
 reset();
@@ -48,6 +50,15 @@ const stubs = {
   },
   undici: {
     fetch: async (url, options) => {
+      if (String(url).includes('groq.test')) {
+        state.groqCalls.push({ url, body: JSON.parse(options.body), auth: options.headers.authorization });
+        return {
+          status: state.groqStatus,
+          ok: state.groqStatus === 200,
+          text: async () => 'nope',
+          json: async () => ({ choices: [{ finish_reason: 'stop', message: { content: 'Previously, by Groq.' } }] }),
+        };
+      }
       state.geminiCalls.push({ url, body: JSON.parse(options.body), key: options.headers['x-goog-api-key'] });
       return {
         status: state.geminiStatus,
@@ -84,6 +95,42 @@ test.beforeEach(() => {
   config.geminiModel = 'gemini-test';
   config.recapUserDailyLimit = 15;
   config.geminiDailyBudget = 200;
+  config.groqApiKey = '';
+  config.groqModel = 'groq-test';
+  config.groqBaseUrl = 'https://groq.test/openai/v1';
+});
+
+test('Groq writes it when Gemini is out of quota, fails or has no key; both failing gives the synopses', async () => {
+  config.groqApiKey = 'groq-key';
+  state.geminiStatus = 429;
+  let answer = await call({ scope: 'season' }, 'g1');
+  assert.equal(answer.payload.source, 'ai');
+  assert.equal(answer.payload.text, 'Previously, by Groq.');
+  assert.equal(state.groqCalls.length, 1);
+  assert.equal(state.groqCalls[0].auth, 'Bearer groq-key');
+  assert.equal(state.groqCalls[0].body.model, 'groq-test');
+  assert.match(state.groqCalls[0].url, /groq\.test\/openai\/v1\/chat\/completions$/);
+
+  state.cache.clear();
+  state.geminiCalls.length = 0;
+  answer = await call({ scope: 'season' }, 'g1');
+  assert.equal(state.geminiCalls.length, 0, 'Gemini is paused after its 429; Groq goes straight away');
+  assert.equal(answer.payload.source, 'ai');
+
+  recap._resetLimits();
+  state.cache.clear();
+  state.geminiStatus = 500;
+  state.groqStatus = 429;
+  answer = await call({ scope: 'season' }, 'g2');
+  assert.equal(answer.payload.source, 'synopses');
+  assert.equal(answer.payload.reason, 'quota');
+
+  recap._resetLimits();
+  state.cache.clear();
+  config.geminiApiKey = '';
+  state.groqStatus = 200;
+  answer = await call({ scope: 'season' }, 'g3');
+  assert.equal(answer.payload.text, 'Previously, by Groq.', 'Groq alone is enough');
 });
 
 test('the cutoff is the latest watched episode, specials aside', () => {
