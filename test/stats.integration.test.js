@@ -147,7 +147,16 @@ test('stats v2: weeks, backlog, library, ratings, genres through the real tables
     { key: 'S1E2', watched: true, at: `${today}T03:00:00Z` },
   ])).status, 200);
   assert.equal((await imported(uid, 9302, [{ key: 'S1E1', watched: true, at: `${today}T05:00:00Z` }])).status, 200);
-  // The backend works out how many aired episodes are left; fix it here so the numbers are known.
+  // The backend works out how many aired episodes are left, in the background after each import; wait for that to
+  // finish (it wrote over the values below now and then, about one run in eight), then fix them so they are known.
+  for (let i = 0; i < 100; i += 1) {
+    const { rows } = await pool.query(
+      'SELECT COUNT(*)::int AS n FROM show_progress WHERE firebase_uid = $1 AND classification_checked_at IS NOT NULL',
+      [uid],
+    );
+    if (rows[0].n === 2) break;
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
   await pool.query(
     `UPDATE show_progress SET unwatched_released_count = 7, is_ended = (series_id = 9302)
      WHERE firebase_uid = $1 AND series_id = ANY($2)`,
