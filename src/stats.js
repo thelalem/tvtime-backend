@@ -16,6 +16,25 @@ const FACTS_CONCURRENCY = 6;
 const CACHE_MS = 60 * 1000;
 
 const cache = new Map(); // uid -> { at, data }
+const inFlight = new Map(); // uid -> Promise of the answer being worked out
+const generations = new Map(); // uid -> times the user's history changed (see invalidateStats)
+
+// Answers past CACHE_MS are only ever replaced, so the map would keep one per person ever looked at (the social page
+// loads other people's stats too): drop them now and then.
+setInterval(() => {
+  const now = Date.now();
+  for (const [uid, entry] of cache) if (now - entry.at >= CACHE_MS) cache.delete(uid);
+  for (const [uid, generation] of generations) if (!cache.has(uid) && !inFlight.has(uid) && generation) generations.delete(uid);
+}, 10 * 60 * 1000).unref();
+
+// The user's history changed (an episode ticked, a rewatch, an import, a movie): the next request works the stats out
+// again instead of answering with the copy kept for a minute. A calculation already running for the old history is
+// not kept or shared either.
+function invalidateStats(uid) {
+  cache.delete(uid);
+  inFlight.delete(uid);
+  generations.set(uid, (generations.get(uid) || 0) + 1);
+}
 
 // The median of a list of numbers (the middle one, or the mean of the two middle ones).
 function median(values) {
@@ -64,20 +83,41 @@ async function factsFor(showIds) {
   const result = new Map();
   const queue = [...showIds];
   const deadline = Date.now() + FACTS_LOOKUP_BUDGET_MS;
+  let timer;
+  // The budget is kept even when a lookup is still running at the deadline (a slow TMDB answer took a reply to about
+  // 12 s, past the app's limit, so the app asked again and again): it is left to finish and fill the cache.
+  const outOfTime = new Promise((resolve) => { timer = setTimeout(resolve, FACTS_LOOKUP_BUDGET_MS); });
   const workers = Array.from({ length: Math.min(FACTS_CONCURRENCY, queue.length) }, async () => {
     while (queue.length && Date.now() < deadline) {
       const id = queue.shift();
-      result.set(id, await showFacts(id));
+      const found = await showFacts(id);
+      if (Date.now() <= deadline) result.set(id, found);
     }
   });
-  await Promise.all(workers);
-  return result;
+  await Promise.race([Promise.all(workers), outOfTime]);
+  clearTimeout(timer);
+  return new Map(result);
 }
 
 async function loadStats(uid, now = new Date()) {
   const cached = cache.get(uid);
   if (cached && now.getTime() - cached.at < CACHE_MS) return cached.data;
+  // A profile and a compare opened together (or the app's retries) share one calculation.
+  const running = inFlight.get(uid);
+  if (running) return running;
+  const generation = generations.get(uid) || 0;
+  const work = computeFor(uid, now).then((data) => {
+    // Kept only if nothing changed meanwhile, and only when finished (an approximate answer is asked for again).
+    if (!data.approximate && (generations.get(uid) || 0) === generation) cache.set(uid, { at: now.getTime(), data });
+    return data;
+  }).finally(() => {
+    if (inFlight.get(uid) === work) inFlight.delete(uid);
+  });
+  inFlight.set(uid, work);
+  return work;
+}
 
+async function computeFor(uid, now) {
   const [user, progress, movies, states, library, ratings] = await Promise.all([
     pool.query('SELECT timezone FROM app_users WHERE firebase_uid = $1', [uid]),
     pool.query(
@@ -152,8 +192,6 @@ async function loadStats(uid, now = new Date()) {
     approximate: unknownFacts > 0,
     generatedAt: now.toISOString(),
   };
-  // An unfinished answer is not kept, so the next request finishes the lookups.
-  if (!data.approximate) cache.set(uid, { at: now.getTime(), data });
   return data;
 }
 
@@ -167,4 +205,4 @@ function registerStatsRoutes(router) {
   });
 }
 
-module.exports = { loadStats, registerStatsRoutes };
+module.exports = { invalidateStats, loadStats, registerStatsRoutes };

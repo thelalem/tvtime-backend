@@ -170,3 +170,23 @@ test('stats v2: weeks, backlog, library, ratings, genres through the real tables
   assert.deepEqual(body.topNetworks, [{ name: 'Netflix', shows: 2 }]);
   assert.equal(body.marathons[0].episodes, 2);
 });
+
+test('stats: a change to the history shows at once, not after the minute the answer is kept', async () => {
+  const uid = newUser();
+  await imported(uid, 9201, [{ key: 'S1E1', watched: true, at: '2026-05-10T10:00:00Z' }]);
+  assert.equal((await api(uid, 'GET', '/me/stats')).body.totals.episodes, 1);
+  await imported(uid, 9201, [{ key: 'S1E2', watched: true, at: '2026-05-11T10:00:00Z' }]);
+  assert.equal((await api(uid, 'GET', '/me/stats')).body.totals.episodes, 2);
+  // A refused write changes nothing and keeps the answer.
+  const refused = await api(uid, 'PUT', '/me/progress/9201/rewatch/episodes/S9E9', {});
+  assert.ok(refused.status >= 400);
+  assert.equal((await api(uid, 'GET', '/me/stats')).body.totals.episodes, 2);
+});
+
+test('stats: two looks at the same person at once share one calculation', async () => {
+  const { loadStats } = require('../src/stats');
+  const uid = newUser();
+  await imported(uid, 9201, [{ key: 'S1E1', watched: true, at: '2026-05-10T10:00:00Z' }]);
+  const [first, second] = await Promise.all([loadStats(uid), loadStats(uid)]);
+  assert.equal(first, second, 'the same answer object, worked out once');
+});

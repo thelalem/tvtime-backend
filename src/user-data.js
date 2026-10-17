@@ -18,7 +18,7 @@ const { registerRewatchRoutes } = require('./rewatches');
 const { registerRecapRoutes } = require('./recap');
 const { allowedWhilePending, deleteAfter, registerAccountRoutes } = require('./account-deletion');
 const { registerImportResolveRoute } = require('./import-resolve');
-const { registerStatsRoutes } = require('./stats');
+const { invalidateStats, registerStatsRoutes } = require('./stats');
 const { registerSocialRoutes } = require('./social');
 const { cleanRewatches, reconcilePasses } = require('./rewatch-logic');
 
@@ -86,6 +86,12 @@ router.use(async (request, response, next) => {
     const pendingAt = rows[0] && rows[0].at;
     if (pendingAt && !allowedWhilePending(request.method, request.path)) {
       return response.status(403).json({ error: 'account_pending_deletion', deleteAfter: deleteAfter(pendingAt) });
+    }
+    // Any change to the account (episodes, rewatches, imports, movies, show states, ratings, the time zone) can
+    // change the stats, which are kept for a minute: the next look works them out again.
+    if (request.method !== 'GET' && request.method !== 'HEAD') {
+      const { uid } = request.user;
+      response.on('finish', () => { if (response.statusCode < 400) invalidateStats(uid); });
     }
     next();
   } catch (error) {
