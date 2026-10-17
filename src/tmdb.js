@@ -341,7 +341,7 @@ async function getMovie(movieId) {
 // cache holds a few KB rather than TMDB's full credit list.
 async function getPerson(personId) {
   return cachedProviderRead(
-    `person:${personId}`,
+    `person-v2:${personId}`,
     async () => slimPerson(await tmdbGet(`/person/${personId}`, {
       append_to_response: 'combined_credits,external_ids,images',
     })),

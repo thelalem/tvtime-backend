@@ -50,6 +50,16 @@ test('a director also gets their crew titles, with the job as the role', () => {
   assert.deepEqual(slim.movies.map((movie) => [movie.id, movie.character]), [[49026, ''], [777, 'Producer']]);
 });
 
+test('credit notes and roles inside a longer one are dropped', () => {
+  const slim = slimPerson(person({
+    combined_credits: {
+      cast: ['Sharon Raydor', 'Captain Sharon Raydor', 'Sharon Raydor (archive footage) (uncredited)', 'Bert (voice)']
+        .map((character) => ({ id: 5, media_type: 'tv', name: 'The Closer', character, episode_count: 1 })),
+    },
+  }));
+  assert.equal(slim.shows[0].character, 'Captain Sharon Raydor, Bert (voice)');
+});
+
 test('missing pieces do not throw', () => {
   const slim = slimPerson({ id: 1 });
   assert.deepEqual([slim.shows, slim.movies, slim.photos], [[], [], []]);

@@ -49,12 +49,24 @@ function mergeCredits(credits, kind, role, into) {
   }
 }
 
+// TMDB keeps every spelling a role was credited under: "Sharon Raydor, Captain Sharon Raydor, Sharon Raydor
+// (archive footage) (uncredited)". The notes go, and a role already inside a longer one goes ("(voice)" stays).
+function tidyRoles(roles) {
+  const cleaned = [];
+  for (const role of roles) {
+    const name = role.replace(/\s*\((uncredited|archive footage)\)/gi, '').trim();
+    if (name && !cleaned.some((kept) => kept.toLowerCase() === name.toLowerCase())) cleaned.push(name);
+  }
+  return cleaned.filter((role) => !cleaned.some((other) =>
+    other !== role && other.toLowerCase().includes(role.toLowerCase())));
+}
+
 function titles(cast, crew, kind, withCrew) {
   const rows = new Map();
   mergeCredits(cast, kind, (credit) => credit.character, rows);
   // A director or writer is listed under their crew jobs; an actor's odd producer credit would only add noise.
   if (withCrew) mergeCredits(crew, kind, (credit) => credit.job, rows);
-  return [...rows.values()].map(({ roles, ...row }) => ({ ...row, character: roles.join(', ') }));
+  return [...rows.values()].map(({ roles, ...row }) => ({ ...row, character: tidyRoles(roles).join(', ') }));
 }
 
 function slimPerson(person) {
