@@ -269,6 +269,19 @@ async function askGroq(prompt) {
     console.error(`[recap] Groq answered ${response.status}: ${detail.slice(0, 300)}`);
     const error = new Fallback('error');
     error.detail = `HTTP ${response.status}: ${detail.slice(0, 200)}`;
+    if (response.status === 404) {
+      // An unknown model: name the ones this key can use, so GROQ_MODEL can be set to one.
+      try {
+        const list = await fetch(`${config.groqBaseUrl.replace(/\/$/, '')}/models`, {
+          headers: { authorization: `Bearer ${config.groqApiKey}` },
+          signal: AbortSignal.timeout(10 * 1000),
+        });
+        const models = ((await list.json()).data || []).map((model) => model.id).sort();
+        error.detail += ` Models available: ${models.join(', ')}`;
+      } catch (_) {
+        // The list is only a hint.
+      }
+    }
     throw error;
   }
   const data = await response.json();
