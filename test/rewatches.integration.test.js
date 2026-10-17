@@ -189,6 +189,27 @@ test('removing the latest rewatch of an episode; the episode stays watched', asy
   assert.equal(progress.rewatchCount, 0);
 });
 
+test('the same request sent again (after a lost answer) adds or removes only once', async () => {
+  const uid = newUser();
+  await watch(uid, season(1, 2));
+  const first = await api(uid, 'PUT', `${R}/episodes/S1E1?requestId=add-0001-abcd`, {});
+  const again = await api(uid, 'PUT', `${R}/episodes/S1E1?requestId=add-0001-abcd`, {});
+  assert.equal(first.body.progress.rewatches.S1E1.length, 1);
+  assert.equal(again.status, 200);
+  assert.equal(again.body.progress.rewatches.S1E1.length, 1, 'not a second rewatch');
+  await api(uid, 'PUT', `${R}/episodes/S1E1?requestId=add-0002-abcd`, {});
+  const removed = await api(uid, 'DELETE', `${R}/episodes/S1E1?requestId=del-0001-abcd`);
+  const removedAgain = await api(uid, 'DELETE', `${R}/episodes/S1E1?requestId=del-0001-abcd`);
+  assert.equal(removed.body.progress.rewatches.S1E1.length, 1);
+  assert.equal(removedAgain.body.progress.rewatches.S1E1.length, 1, 'not a second removal');
+  // A refused request is not recorded: sent again once allowed, it applies.
+  const refused = await api(uid, 'PUT', `${R}/episodes/S2E1?requestId=add-0003-abcd`, {});
+  assert.equal(refused.status, 409, 'S2E1 is not watched yet');
+  await watch(uid, ['S2E1']);
+  const applied = await api(uid, 'PUT', `${R}/episodes/S2E1?requestId=add-0003-abcd`, {});
+  assert.equal(applied.body.progress.rewatches.S2E1.length, 1);
+});
+
 test('removing the last rewatch of a season is refused while its pass is open', async () => {
   const uid = newUser();
   await watch(uid, season(1, 2));

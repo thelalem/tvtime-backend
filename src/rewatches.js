@@ -98,6 +98,32 @@ async function save(db, uid, seriesId, state, rewatches, { touchAtMs } = {}) {
   return { progress: rows[0], completedSeasons: finished };
 }
 
+const REQUEST_ID = /^[A-Za-z0-9_-]{8,64}$/;
+
+// True when this request was applied before: the app sends the same `requestId` again when an answer
+// is lost to a timeout, and adding (or removing) a rewatch a second time would count it twice. Recorded
+// in the same transaction as the write, so a rolled-back attempt does not count. No id (an older app):
+// always applied.
+async function alreadyApplied(db, uid, request) {
+  const requestId = request.query.requestId;
+  if (typeof requestId !== 'string' || !REQUEST_ID.test(requestId)) return false;
+  const { rowCount } = await db.query(
+    `INSERT INTO rewatch_requests(firebase_uid, request_id) VALUES ($1, $2)
+     ON CONFLICT DO NOTHING`,
+    [uid, requestId],
+  );
+  return rowCount === 0;
+}
+
+// The row as it is, for a repeated request.
+async function currentRow(db, uid, seriesId) {
+  const { rows } = await db.query(
+    `SELECT ${PROGRESS_COLUMNS} FROM show_progress WHERE firebase_uid=$1 AND series_id=$2`,
+    [uid, seriesId],
+  );
+  return { progress: rows[0], completedSeasons: [] };
+}
+
 // Runs [work] inside a transaction under the show's lock, and answers with what it returns.
 async function inShowLock(request, response, next, seriesId, work) {
   const db = await pool.connect().catch((error) => { next(error); return null; });
@@ -194,12 +220,15 @@ function registerRewatchRoutes(router) {
     });
   }));
 
-  // Adds a rewatch of one episode: `{ at? }`. Inside a pass that still wants the episode it counts for
+  // Adds a rewatch of one episode: `{ at? }`, `?requestId=` (see alreadyApplied). Inside a pass that still wants the episode it counts for
   // the pass; otherwise it is a rewatch of its own.
   router.put(`${base}/episodes/:key`, withIds((request, response, next, seriesId) => {
     const key = request.params.key;
     if (!EPISODE_KEY.test(key)) return response.status(400).json({ error: 'invalid_episode' });
     return inShowLock(request, response, next, seriesId, async (db, state) => {
+      if (await alreadyApplied(db, request.user.uid, request)) {
+        return { body: await currentRow(db, request.user.uid, seriesId) };
+      }
       if (!state.watched.has(key)) throw new RewatchError(409, 'not_watched');
       const at = parseAt(request.body?.at, Date.now());
       const pass = passFor(state.passes, key, state.watched, state.rewatches);
@@ -216,6 +245,9 @@ function registerRewatchRoutes(router) {
     const key = request.params.key;
     if (!EPISODE_KEY.test(key)) return response.status(400).json({ error: 'invalid_episode' });
     return inShowLock(request, response, next, seriesId, async (db, state) => {
+      if (await alreadyApplied(db, request.user.uid, request)) {
+        return { body: await currentRow(db, request.user.uid, seriesId) };
+      }
       const rewatches = removeLatest(state.rewatches, key);
       if (!rewatches) throw new RewatchError(404, 'no_rewatch');
       return { body: await save(db, request.user.uid, seriesId, state, rewatches) };

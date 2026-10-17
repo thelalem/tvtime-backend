@@ -15,7 +15,7 @@ const { initializeDatabase } = require('../src/schema');
 const { cleanUpOldRows } = require('../src/cleanup');
 
 const uid = `it-cleanup-${Date.now()}`;
-const keys = [`it-cleanup-old-${uid}`, `it-cleanup-new-${uid}`];
+const keys = [`it-cleanup-old-${uid}`, `it-cleanup-new-${uid}`, `recap:it-${uid}-kept`, `recap:it-${uid}-old`];
 
 test.before(async () => {
   await initializeDatabase();
@@ -31,7 +31,8 @@ test.after(async () => {
 test('rows past their longest life go; recent ones stay', async () => {
   await pool.query(
     `INSERT INTO provider_cache(key, data, fetched_at) VALUES
-       ($1, '"old"', NOW() - INTERVAL '100 days'), ($2, '"new"', NOW() - INTERVAL '80 days')`,
+       ($1, '"old"', NOW() - INTERVAL '100 days'), ($2, '"new"', NOW() - INTERVAL '80 days'),
+       ($3, '"recap"', NOW() - INTERVAL '100 days'), ($4, '"recap"', NOW() - INTERVAL '190 days')`,
     keys,
   );
   await pool.query(
@@ -43,7 +44,7 @@ test('rows past their longest life go; recent ones stay', async () => {
   await cleanUpOldRows();
 
   const cache = await pool.query('SELECT key FROM provider_cache WHERE key = ANY($1)', [keys]);
-  assert.deepEqual(cache.rows.map((row) => row.key), [keys[1]]);
+  assert.deepEqual(cache.rows.map((row) => row.key).sort(), [keys[1], keys[2]].sort(), 'a recap lives 180 days');
   const sent = await pool.query('SELECT episode FROM notifications_sent WHERE firebase_uid=$1', [uid]);
   assert.deepEqual(sent.rows.map((row) => row.episode), [2]);
 });

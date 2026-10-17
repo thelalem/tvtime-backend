@@ -94,6 +94,15 @@ async function initializeDatabase() {
       PRIMARY KEY (firebase_uid, series_id, season)
     );
 
+    -- Request ids of single-episode rewatch adds and removals already applied. The app may send one again
+    -- after a timeout (the answer was lost, not the write); a repeat id changes nothing. Kept a day (cleanup.js).
+    CREATE TABLE IF NOT EXISTS rewatch_requests (
+      firebase_uid TEXT NOT NULL REFERENCES app_users(firebase_uid) ON DELETE CASCADE,
+      request_id TEXT NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      PRIMARY KEY (firebase_uid, request_id)
+    );
+
     -- When an episode was last unmarked. Kept apart from show_progress on
     -- purpose: a row here is invisible to the watchlist, All Shows and the
     -- tracked-show state, so remembering an unwatch cannot make an unwatched
@@ -247,6 +256,8 @@ async function initializeDatabase() {
     -- Whether a new follower or a follow request sends a push (FEATURE_PLAN.md section 19), and when the last one
     -- for a follower and followee pair went out (at most one a day, so unfollowing and following again cannot spam).
     ${addColumns('app_users', [['social_notifications', 'BOOLEAN NOT NULL DEFAULT TRUE']])}
+    -- When the user asked for the account to be deleted (account-deletion.js); deleted 30 days later.
+    ${addColumns('app_users', [['deletion_requested_at', 'TIMESTAMPTZ']])}
     CREATE TABLE IF NOT EXISTS follow_notices (
       follower_uid TEXT NOT NULL REFERENCES app_users(firebase_uid) ON DELETE CASCADE,
       followee_uid TEXT NOT NULL REFERENCES app_users(firebase_uid) ON DELETE CASCADE,
