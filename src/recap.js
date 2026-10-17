@@ -267,7 +267,9 @@ async function askGroq(prompt) {
   if (!response.ok) {
     const detail = await response.text().catch(() => '');
     console.error(`[recap] Groq answered ${response.status}: ${detail.slice(0, 300)}`);
-    throw new Fallback('error');
+    const error = new Fallback('error');
+    error.detail = `HTTP ${response.status}: ${detail.slice(0, 200)}`;
+    throw error;
   }
   const data = await response.json();
   const choice = (data.choices || [])[0] || {};
@@ -282,7 +284,7 @@ async function askGroq(prompt) {
 
 // Gemini, then Groq ([preferGroq]: Groq first, for checking the backup on the live server). Throws a Fallback
 // with the reason when neither wrote it ('quota' when one was out of quota, else 'error').
-async function writeRecap(prompt, { preferGroq = false } = {}) {
+async function writeRecap(prompt, { preferGroq = false, notes = null } = {}) {
   const reasons = [];
   const now = Date.now();
   const groqReady = Boolean(config.groqApiKey) && now >= pausedUntil.groq;
@@ -298,8 +300,12 @@ async function writeRecap(prompt, { preferGroq = false } = {}) {
   ];
   if (preferGroq) writers.reverse();
   for (const writer of writers) {
-    if (!writer.configured) continue;
+    if (!writer.configured) {
+      if (notes) notes[writer.name] = 'no key';
+      continue;
+    }
     if (!writer.ready) {
+      if (notes) notes[writer.name] = 'paused after running out of quota';
       reasons.push('quota');
       continue;
     }
@@ -307,6 +313,7 @@ async function writeRecap(prompt, { preferGroq = false } = {}) {
       return { text: await writer.ask(), model: writer.model };
     } catch (error) {
       if (!(error instanceof Fallback)) console.error(`[recap] ${writer.name} failed: ${error.message}`);
+      if (notes) notes[writer.name] = error.detail || (error instanceof Fallback ? error.reason : error.message);
       reasons.push(error instanceof Fallback ? error.reason : 'error');
     }
   }
@@ -360,6 +367,9 @@ function registerRecapRoutes(router) {
         : `recap:v4:${seriesId}:${scope}:S${cutoff.season}E${cutoff.episode}`;
       let material = null;
       const answer = { season: cutoff.season, episode: cutoff.episode, scope };
+      // writer=groq (checking the backup): Groq first, and the answer says what happened with each writer.
+      const preferGroq = request.query.writer === 'groq';
+      const writerNotes = {};
       try {
         // Two people (or two taps) asking for the same recap share one model call.
         let pending = inFlight.get(key);
@@ -371,19 +381,26 @@ function registerRecapRoutes(router) {
             if (!takeUserCall(request.user.uid, config.recapUserDailyLimit)) throw new Fallback('limit');
             if (!(await takeBudgetCall(config.geminiDailyBudget))) throw new Fallback('quota');
             return writeRecap(buildPrompt(showName, cutoff, scope, material), {
-              preferGroq: request.query.writer === 'groq',
+              preferGroq,
+              notes: preferGroq ? writerNotes : null,
             });
           });
           inFlight.set(key, pending);
           pending.finally(() => inFlight.delete(key)).catch(() => {});
         }
         const cached = await pending;
-        return response.json({ ...answer, source: 'ai', model: cached.model, text: cached.text });
+        return response.json({
+          ...answer, source: 'ai', model: cached.model, text: cached.text,
+          ...(preferGroq && Object.keys(writerNotes).length ? { writerNotes } : {}),
+        });
       } catch (error) {
         const reason = error instanceof Fallback ? error.reason : 'error';
         if (!(error instanceof Fallback)) console.error(`[recap] ${seriesId}: ${error.message}`);
         material = material || await loadMaterial(seriesId, showName, cutoff, scope);
-        return response.json({ ...answer, source: 'synopses', reason, text: stitchSynopses(material) });
+        return response.json({
+          ...answer, source: 'synopses', reason, text: stitchSynopses(material),
+          ...(preferGroq && Object.keys(writerNotes).length ? { writerNotes } : {}),
+        });
       }
     } catch (error) {
       return next(error);
