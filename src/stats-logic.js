@@ -23,8 +23,31 @@ const TOP_COUNT = 5;
 const WEEKS = 12;
 const PACE_WEEKS = 8;
 
-const formatters = new Map();
+// Turning a moment into a day on the user's clock (Intl) was most of the time spent on a big library (about 14,000
+// calls, around a second). Every zone's offset is a whole number of quarter hours, so a local midnight always falls on
+// a quarter-hour boundary in UTC: every moment within one quarter hour is on the same day, and the day of each
+// quarter hour is remembered.
+const QUARTER_HOUR_MS = 15 * MINUTE_MS;
+const DAY_CACHE_LIMIT = 200000;
+const daysByZone = new Map(); // timeZone -> Map(quarter hour -> YYYY-MM-DD)
 function dayOf(ms, timeZone) {
+  let days = daysByZone.get(timeZone);
+  if (!days) {
+    days = new Map();
+    daysByZone.set(timeZone, days);
+  }
+  const slot = Math.floor(ms / QUARTER_HOUR_MS);
+  let day = days.get(slot);
+  if (day === undefined) {
+    if (days.size >= DAY_CACHE_LIMIT) days.clear();
+    day = formatDay(slot * QUARTER_HOUR_MS, timeZone);
+    days.set(slot, day);
+  }
+  return day;
+}
+
+const formatters = new Map();
+function formatDay(ms, timeZone) {
   let formatter = formatters.get(timeZone);
   if (!formatter) {
     try {
@@ -53,15 +76,27 @@ function addDays(date, count) {
   return new Date(Date.parse(`${date}T00:00:00Z`) + count * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
 }
 
-// The Monday of the week a YYYY-MM-DD is in.
-function weekStart(date) {
-  const weekday = new Date(Date.parse(`${date}T00:00:00Z`)).getUTCDay(); // 0 = Sunday
-  return addDays(date, -((weekday + 6) % 7));
+// Remembered per date: called once per watch, for a few thousand distinct dates.
+function remembered(compute) {
+  const known = new Map();
+  return (date) => {
+    let value = known.get(date);
+    if (value === undefined) {
+      if (known.size >= DAY_CACHE_LIMIT) known.clear();
+      value = compute(date);
+      known.set(date, value);
+    }
+    return value;
+  };
 }
 
-function dayNumber(date) {
-  return Math.round(Date.parse(`${date}T00:00:00Z`) / (24 * 60 * 60 * 1000));
-}
+// The Monday of the week a YYYY-MM-DD is in.
+const weekStart = remembered((date) => {
+  const weekday = new Date(Date.parse(`${date}T00:00:00Z`)).getUTCDay(); // 0 = Sunday
+  return addDays(date, -((weekday + 6) % 7));
+});
+
+const dayNumber = remembered((date) => Math.round(Date.parse(`${date}T00:00:00Z`) / (24 * 60 * 60 * 1000)));
 
 const isSpecial = (key) => key.startsWith('S0E');
 

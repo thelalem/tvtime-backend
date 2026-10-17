@@ -1,6 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { BULK_LIMIT, computeStats } = require('../src/stats-logic');
+const { BULK_LIMIT, computeStats, dayOf } = require('../src/stats-logic');
 
 const NOW = new Date('2026-10-17T12:00:00Z');
 const show = (id, name, watched, dates, extra = {}) => ({
@@ -121,4 +121,25 @@ test('an unknown timezone falls back to UTC, and bad dates are ignored', () => {
   const result = stats([show(1, 'A', ['S1E1', 'S1E2'], { S1E1: '2026-01-01T10:00:00Z', S1E2: 'not a date' })], [], 'Not/AZone');
   assert.equal(result.activeDays, 1);
   assert.equal(result.totals.episodes, 2, 'still counted as watched');
+});
+
+test('a day on the user clock is right on both sides of local midnight, in zones a quarter or half hour off', () => {
+  // Days are remembered per quarter hour (stats-logic.js dayOf); local midnight falls on a quarter hour everywhere.
+  const cases = [
+    ['Asia/Kathmandu', '2026-03-10T18:14:59.999Z', '2026-03-10'], // +05:45
+    ['Asia/Kathmandu', '2026-03-10T18:15:00.000Z', '2026-03-11'],
+    ['America/St_Johns', '2026-01-10T03:29:59.999Z', '2026-01-09'], // -03:30
+    ['America/St_Johns', '2026-01-10T03:30:00.000Z', '2026-01-10'],
+    ['Africa/Addis_Ababa', '2026-10-16T20:59:59.999Z', '2026-10-16'],
+    ['Africa/Addis_Ababa', '2026-10-16T21:00:00.000Z', '2026-10-17'],
+    // Lord Howe moves its clock by half an hour for summer time.
+    ['Australia/Lord_Howe', '2026-01-10T13:00:00.000Z', '2026-01-11'], // +11:00 in summer
+    ['Australia/Lord_Howe', '2026-07-10T13:29:59.999Z', '2026-07-10'], // +10:30 in winter
+    ['Australia/Lord_Howe', '2026-07-10T13:30:00.000Z', '2026-07-11'],
+  ];
+  for (const [zone, at, day] of cases) {
+    // Twice: the second answer comes from what was remembered.
+    assert.equal(dayOf(Date.parse(at), zone), day, `${zone} ${at}`);
+    assert.equal(dayOf(Date.parse(at), zone), day, `${zone} ${at} (remembered)`);
+  }
 });
